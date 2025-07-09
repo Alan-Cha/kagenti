@@ -98,10 +98,15 @@ eval $(minikube docker-env)
 docker build -t client_registration .
 ```
 
-### Load client registration image
+### Create Kubernetes secret
 
 ```sh
-minikube image load client_registration
+kubectl create secret generic keycloak-secret \
+  --from-literal=KEYCLOAK_URL=http://keycloak:8080 \
+  --from-literal=KEYCLOAK_REALM=master \
+  --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
+  --from-literal=KEYCLOAK_ADMIN_PASSWORD=admin \
+  --from-literal=CLIENT_NAME=client_registration_k8s
 ```
 
 ### Run client registration job

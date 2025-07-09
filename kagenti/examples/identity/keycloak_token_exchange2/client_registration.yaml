@@ -11,14 +11,29 @@ spec:
         imagePullPolicy: Never
         env:
         - name: KEYCLOAK_URL
-          value: "http://keycloak:8080"
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secret
+              key: KEYCLOAK_URL
         - name: KEYCLOAK_REALM
-          value: "master"
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secret
+              key: KEYCLOAK_REALM
         - name: KEYCLOAK_ADMIN_USERNAME
-          value: "admin"
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secret
+              key: KEYCLOAK_ADMIN_USERNAME
         - name: KEYCLOAK_ADMIN_PASSWORD
-          value: "admin"
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secret
+              key: KEYCLOAK_ADMIN_PASSWORD
         - name: CLIENT_NAME
-          value: "client_registration_k8s"
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secret
+              key: CLIENT_NAME
       restartPolicy: Never
   backoffLimit: 1

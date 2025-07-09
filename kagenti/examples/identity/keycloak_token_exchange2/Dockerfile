@@ -1,12 +1,6 @@
 # Use minimal Python base image
 FROM python:3.12-slim
 
-ENV KEYCLOAK_URL=""
-ENV KEYCLOAK_REALM=""
-ENV KEYCLOAK_ADMIN_USERNAME=""
-ENV KEYCLOAK_ADMIN_PASSWORD=""
-ENV CLIENT_NAME=""
-
 # Set work directory
 WORKDIR /app
 
