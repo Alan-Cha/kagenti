@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: my-agent
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: environments
+  namespace: my-agent
+data:
+  SPIRE_ENABLED: "true"
+  # Replace these placeholder values with real endpoints/credentials
+  KEYCLOAK_URL: "http://keycloak.keycloak.svc:8080"
+  KEYCLOAK_REALM: "master"
+  KEYCLOAK_ADMIN_USERNAME: "admin"
+  KEYCLOAK_ADMIN_PASSWORD: "admin"
+  KEYCLOAK_TOKEN_EXCHANGE_ENABLED: "true"
+  KEYCLOAK_CLIENT_REGISTRATION_ENABLED: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-service-account
+  namespace: my-agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: my-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: my-app
+        spiffe.io/spiffe-id: my-agent
+    spec:
+      serviceAccountName: my-service-account
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: my-app
+          image: busybox:latest
+          command: ["sh", "-c", "sleep 3600"]
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared
+        - name: spiffe-helper
+          image: ghcr.io/spiffe/spiffe-helper:nightly
+          command:
+            - /spiffe-helper
+            - -config=/etc/spiffe-helper/helper.conf
+            - run
+          volumeMounts:
+            - name: spiffe-helper-config
+              mountPath: /etc/spiffe-helper
+            - name: spire-agent-socket
+              mountPath: /spiffe-workload-api
+            - name: svid-output
+              mountPath: /opt
+        - name: client-registration
+          image: ghcr.io/kagenti/kagenti-extensions/client-registration:latest
+          command:
+            - /bin/sh
+            - -c
+            - >
+              if [ "$SPIRE_ENABLED" = "true" ]; then while [ ! -f /opt/jwt_svid.token ]; do echo waiting for SVID; sleep 1; done; fi;
+              python client_registration.py;
+              tail -f /dev/null
+          env:
+            - name: SPIRE_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: environments
+                  key: SPIRE_ENABLED
+            - name: KEYCLOAK_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: environments
+                  key: KEYCLOAK_URL
+                  optional: true
+            - name: KEYCLOAK_REALM
+              valueFrom:
+                configMapKeyRef:
+                  name: environments
+                  key: KEYCLOAK_REALM
+            - name: KEYCLOAK_ADMIN_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: environments
+                  key: KEYCLOAK_ADMIN_USERNAME
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                configMapKeyRef:
+                  name: environments
+                  key: KEYCLOAK_ADMIN_PASSWORD
+            - name: CLIENT_NAME
+              value: my-app
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared
+            - name: svid-output
+              mountPath: /opt
+      volumes:
+        - name: shared-data
+          emptyDir: {}
+        - name: spiffe-helper-config
+          configMap:
+            name: spiffe-helper-config
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/agent-sockets
+        - name: svid-output
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffe-helper-config
+  namespace: my-agent
+data:
+  helper.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cmd = ""
+    cmd_args = ""
+    svid_file_name = "/opt/svid.pem"
+    svid_key_file_name = "/opt/svid_key.pem"
+    svid_bundle_file_name = "/opt/svid_bundle.pem"
+    jwt_svids = [{jwt_audience="kagenti", jwt_svid_file_name="/opt/jwt_svid.token"}]
+    jwt_svid_file_mode = 0644
+    include_federated_domains = true

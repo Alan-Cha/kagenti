@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  annotations:
+    meta.helm.sh/release-name: kagenti-deps
+    meta.helm.sh/release-namespace: kagenti-system
+  creationTimestamp: "2026-02-04T22:03:12Z"
+  generation: 1
+  labels:
+    app: keycloak
+    app.kubernetes.io/instance: kagenti-deps
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: kagenti-deps
+    app.kubernetes.io/version: "1.0"
+    helm.sh/chart: kagenti-deps-0.1.0
+  name: keycloak
+  namespace: keycloak
+  resourceVersion: "3304"
+  uid: 2770dc13-bb6f-4798-ac3f-95632bdd37ea
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  podManagementPolicy: OrderedReady
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: keycloak
+  serviceName: keycloak-discovery
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: keycloak
+    spec:
+      containers:
+      - args:
+        - start
+        env:
+        - name: KC_FEATURES
+          value: "client-auth-federated:v1,spiffe:v1"
+        - name: KC_BOOTSTRAP_ADMIN_USERNAME
+          value: admin
+        - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+          value: admin
+        - name: KC_PROXY_HEADERS
+          value: forwarded
+        - name: KC_HTTP_ENABLED
+          value: "true"
+        - name: KC_HOSTNAME_STRICT
+          value: "false"
+        - name: KC_HOSTNAME
+          value: http://keycloak.localtest.me:8080/
+        - name: KC_HEALTH_ENABLED
+          value: "true"
+        - name: KC_CACHE
+          value: ispn
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        - name: JAVA_OPTS_APPEND
+          value: -Djgroups.bind.address=$(POD_IP)
+        - name: KC_DB_URL_DATABASE
+          value: keycloak
+        - name: KC_DB_URL_HOST
+          value: postgres
+        - name: KC_DB
+          value: postgres
+        - name: KC_DB_PASSWORD
+          value: keycloak
+        - name: KC_DB_USERNAME
+          value: keycloak
+        - name: KC_DB_URL_PROPERTIES
+          value: ?sslmode=disable
+        - name: KC_DB_POOL_INITIAL_SIZE
+          value: "5"
+        - name: KC_DB_POOL_MIN_SIZE
+          value: "5"
+        - name: KC_DB_POOL_MAX_SIZE
+          value: "20"
+        image: quay.io/keycloak/keycloak:26.5.2
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health/live
+            port: 9000
+            scheme: HTTP
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        name: keycloak
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health/ready
+            port: 9000
+            scheme: HTTP
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1500Mi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        startupProbe:
+          failureThreshold: 600
+          httpGet:
+            path: /health/started
+            port: 9000
+            scheme: HTTP
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 60
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+  updateStrategy:
+    rollingUpdate:
+      partition: 0
+    type: RollingUpdate
+status:
+  availableReplicas: 1
+  collisionCount: 0
+  currentReplicas: 1
+  currentRevision: keycloak-857d8dddf4
+  observedGeneration: 1
+  readyReplicas: 1
+  replicas: 1
+  updateRevision: keycloak-857d8dddf4
+  updatedReplicas: 1

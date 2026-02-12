@@ -1,0 +1,4 @@
+python-keycloak==7.0.3
+pyjwt==2.10.1
+spiffe>=0.2.3
+requests>=2.31.0
