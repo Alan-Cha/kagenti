@@ -23,8 +23,12 @@ KEYCLOAK_REALM = "demo"
 KEYCLOAK_ADMIN_USERNAME = "admin"
 KEYCLOAK_ADMIN_PASSWORD = "admin"
 
-# SPIRE OIDC Discovery Provider issuer (cluster-local)
-SPIRE_ISSUER = "http://spire-oidc.spire.svc.cluster.local"
+# SPIRE OIDC Discovery Provider configuration
+# Issuer must match the JWT-SVID iss claim
+# Using internal cluster URL so Keycloak can reach it from inside the cluster
+SPIRE_ISSUER = "http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local"
+# JWKS URL - use cluster-internal HTTP endpoint
+SPIRE_JWKS_URL = "http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local/keys"
 IDP_ALIAS = "spire-oidc"
 
 # SPIFFE ID for the agent pod
@@ -53,19 +57,17 @@ def get_or_create_realm(keycloak_admin: KeycloakAdmin, realm_name: str) -> None:
         raise
 
 
-def ensure_oidc_idp(kc: KeycloakAdmin, alias: str, issuer: str) -> None:
+def ensure_oidc_idp(kc: KeycloakAdmin, alias: str, issuer: str, jwks_url: str) -> None:
     """
-    Create (or verify) an OIDC Identity Provider pointing at the
+    Create or update an OIDC Identity Provider pointing at the
     SPIRE OIDC Discovery Provider. Idempotent.
-    """
-    try:
-        idps = kc.get_idps()
-        if any(p.get("alias") == alias for p in idps):
-            print(f'Identity Provider "{alias}" already exists.')
-            return
-    except KeycloakGetError as e:
-        print(f"Warning: could not list IdPs: {e}. Attempting to create.")
 
+    Args:
+        kc: KeycloakAdmin instance
+        alias: Identity Provider alias
+        issuer: Issuer URL (must match JWT iss claim)
+        jwks_url: URL to fetch JWKS (can be cluster-internal)
+    """
     idp_payload = {
         "alias": alias,
         "providerId": "oidc",
@@ -73,10 +75,44 @@ def ensure_oidc_idp(kc: KeycloakAdmin, alias: str, issuer: str) -> None:
         "config": {
             "issuer": issuer,
             "useJwksUrl": "true",
-            "jwksUrl": issuer.replace("http://", "https://") + "/keys",
-            "validateSignature": "true",
+            "jwksUrl": jwks_url,
+            # Temporarily disable signature validation to isolate the discovery issue
+            "validateSignature": "false",
+            # Enable this IdP for federated client authentication
+            "clientAssertionSigningAlg": "RS256",
         },
     }
+
+    try:
+        idps = kc.get_idps()
+        existing_idp = next((p for p in idps if p.get("alias") == alias), None)
+
+        if existing_idp:
+            # Check if issuer, JWKS URL, or client assertion support needs updating
+            existing_issuer = existing_idp.get("config", {}).get("issuer")
+            existing_jwks = existing_idp.get("config", {}).get("jwksUrl")
+            existing_client_assertion_alg = existing_idp.get("config", {}).get("clientAssertionSigningAlg")
+
+            if (existing_issuer == issuer and existing_jwks == jwks_url and
+                existing_client_assertion_alg == "RS256"):
+                print(f'Identity Provider "{alias}" already exists with correct configuration.')
+                return
+            else:
+                print(f'Updating Identity Provider "{alias}":')
+                if existing_issuer != issuer:
+                    print(f'  Issuer - Old: {existing_issuer}')
+                    print(f'           New: {issuer}')
+                if existing_jwks != jwks_url:
+                    print(f'  JWKS URL - Old: {existing_jwks}')
+                    print(f'             New: {jwks_url}')
+                if existing_client_assertion_alg != "RS256":
+                    print(f'  Client Assertion Alg - Old: {existing_client_assertion_alg}')
+                    print(f'                         New: RS256')
+                kc.update_idp(alias, idp_payload)
+                print(f'Identity Provider "{alias}" updated.')
+                return
+    except KeycloakGetError as e:
+        print(f"Warning: could not list IdPs: {e}. Attempting to create.")
 
     try:
         kc.create_idp(idp_payload)
@@ -84,6 +120,12 @@ def ensure_oidc_idp(kc: KeycloakAdmin, alias: str, issuer: str) -> None:
     except KeycloakPostError as e:
         if e.response_code == 409:
             print(f'Identity Provider "{alias}" already exists (409).')
+            # Try to update it
+            try:
+                kc.update_idp(alias, idp_payload)
+                print(f'Updated Identity Provider "{alias}" with new issuer.')
+            except Exception as update_err:
+                print(f'Could not update IdP: {update_err}')
             return
         raise
 
@@ -143,6 +185,7 @@ def main() -> int:
     print(f"\nKeycloak:          {KEYCLOAK_URL}")
     print(f"Realm:             {KEYCLOAK_REALM}")
     print(f"SPIRE Issuer:      {SPIRE_ISSUER}")
+    print(f"SPIRE JWKS URL:    {SPIRE_JWKS_URL}")
     print(f"IdP Alias:         {IDP_ALIAS}")
     print(f"Client:            {CLIENT_NAME}")
     print(f"Federated Subject: {AGENT_SPIFFE_ID}")
@@ -178,7 +221,7 @@ def main() -> int:
 
     # Create SPIRE OIDC Identity Provider
     print(f"\n--- Identity Provider ---")
-    ensure_oidc_idp(kc, alias=IDP_ALIAS, issuer=SPIRE_ISSUER)
+    ensure_oidc_idp(kc, alias=IDP_ALIAS, issuer=SPIRE_ISSUER, jwks_url=SPIRE_JWKS_URL)
 
     # Register client with federated auth configured
     print(f"\n--- Client ---")

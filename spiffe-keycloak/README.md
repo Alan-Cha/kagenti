@@ -45,62 +45,10 @@ The integration allows workloads with SPIFFE identities to authenticate to Keycl
 2. **Keycloak version 26.5.2+** with features `client-auth-federated:v1,spiffe:v1` enabled
 3. **Python 3.11+** for running setup and test scripts
 
-## How SPIRE Registration Works
-
-Before diving into setup, it's important to understand how SPIRE identity registration works:
-
-### SPIFFE IDs Are NOT Automatic
-
-Unlike some identity systems, SPIRE **does not automatically** create identities. You must explicitly register each workload identity. This is a security feature - only explicitly authorized workloads receive identities.
-
-### Registration Entries
-
-A **registration entry** tells SPIRE:
-- **SPIFFE ID**: What identity to issue (e.g., `spiffe://localtest.me/ns/authbridge/sa/agent`)
-- **Parent ID**: Which SPIRE agent is authorized to issue this identity
-- **Selectors**: How to identify the workload requesting the identity
-
-### The Parent-Child Hierarchy
-
-```
-SPIRE Server (root of trust, manages CA)
-    ↓
-SPIRE Agent (runs on each node, attested by server)
-    ↓  (parentID = agent's SPIFFE ID)
-Workload (gets identity from local agent)
-```
-
-Each SPIRE agent gets its own SPIFFE ID when it attests to the server (e.g., `spiffe://localtest.me/spire/agent/k8s_psat/cluster/node-uid`). When you register a workload, you specify which agent(s) can issue that workload's identity.
-
-### Selectors
-
-**Selectors** define how SPIRE matches workloads to identities. Common Kubernetes selectors:
-- `k8s:ns:namespace-name` - Match pods in a specific namespace
-- `k8s:sa:service-account` - Match pods using a service account
-- `k8s:pod-label:key:value` - Match pods with specific labels
-
-For local testing (outside Kubernetes):
-- `unix:uid:1000` - Match processes running as a specific user ID
-
-### Example Registration
-
-```bash
-# Register a workload identity for pods in namespace "authbridge"
-# using service account "agent"
-kubectl exec -n spire-namespace spire-server-0 -- \
-  /opt/spire/bin/spire-server entry create \
-  -spiffeID spiffe://localtest.me/ns/authbridge/sa/agent \
-  -parentID spiffe://localtest.me/spire/agent/... \
-  -selector k8s:ns:authbridge \
-  -selector k8s:sa:agent
-```
-
-When a pod matching those selectors requests an identity, SPIRE issues a JWT-SVID containing the registered SPIFFE ID.
-
 ## Files
 
-- `keycloak-statefulset.yaml` - Modified Keycloak deployment with required features enabled
-- `setup3.py` - Provisions Keycloak realm, OIDC IdP, and federated client
+- `keycloak_statefulset.yaml` - Modified Keycloak deployment with required features enabled
+- `keycloak_federated_client.py` - Provisions Keycloak realm, OIDC IdP, and federated client
 - `test_spiffe_auth.py` - Test script demonstrating the authentication flow
 - `register_workload.sh` - Helper script to register the test workload in SPIRE
 - `requirements.txt` - Python dependencies

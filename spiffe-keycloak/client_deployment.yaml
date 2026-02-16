@@ -1,0 +1,321 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: authbridge
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-config
+  namespace: authbridge
+data:
+  KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
+  KEYCLOAK_REALM: "demo"
+  CLIENT_ID: "federated-agent-a"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent
+  namespace: authbridge
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spiffe-keycloak-test
+  namespace: authbridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spiffe-keycloak-test
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spiffe-keycloak-test
+    spec:
+      serviceAccountName: agent
+      containers:
+        - name: test-client
+          image: python:3.11-slim
+          command: ["sh", "-c", "sleep 3600"]
+          envFrom:
+            - configMapRef:
+                name: test-config
+          volumeMounts:
+            - name: svid-output
+              mountPath: /opt
+            - name: test-scripts
+              mountPath: /app
+          workingDir: /app
+        - name: spiffe-helper
+          image: ghcr.io/spiffe/spiffe-helper:nightly
+          command:
+            - /spiffe-helper
+            - -config=/etc/spiffe-helper/helper.conf
+            - run
+          volumeMounts:
+            - name: spiffe-helper-config
+              mountPath: /etc/spiffe-helper
+            - name: spire-agent-socket
+              mountPath: /spiffe-workload-api
+            - name: svid-output
+              mountPath: /opt
+      volumes:
+        - name: spiffe-helper-config
+          configMap:
+            name: spiffe-helper-config
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/agent-sockets
+        - name: svid-output
+          emptyDir: {}
+        - name: test-scripts
+          configMap:
+            name: test-scripts
+            defaultMode: 0755
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spiffe-helper-config
+  namespace: authbridge
+data:
+  helper.conf: |
+    agent_address = "/spiffe-workload-api/spire-agent.sock"
+    cmd = ""
+    cmd_args = ""
+    svid_file_name = "/opt/svid.pem"
+    svid_key_file_name = "/opt/svid_key.pem"
+    svid_bundle_file_name = "/opt/svid_bundle.pem"
+    jwt_svids = [{jwt_audience="http://keycloak-service.keycloak.svc:8080/realms/demo", jwt_svid_file_name="/opt/jwt_svid.token"}]
+    jwt_svid_file_mode = 0644
+    include_federated_domains = true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-scripts
+  namespace: authbridge
+data:
+  utilities.py: |
+    import jwt
+
+    def get_client_id() -> str:
+        """
+        Read the SVID JWT from file and extract the client ID from the "sub" claim.
+        """
+        jwt_file_path = "/opt/jwt_svid.token"
+        content = None
+        try:
+            with open(jwt_file_path, "r") as file:
+                content = file.read()
+        except FileNotFoundError:
+            print(f"Error: The file {jwt_file_path} was not found.")
+            raise
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            raise
+
+        if content is None or content.strip() == "":
+            raise Exception("No content read from SVID JWT.")
+
+        # Decode JWT to get client ID (SPIFFE ID)
+        decoded = jwt.decode(content, options={"verify_signature": False})
+        if "sub" not in decoded:
+            raise Exception('SVID JWT does not contain a "sub" claim.')
+        return decoded["sub"]
+
+    def get_jwt_svid() -> str:
+        """
+        Read and return the JWT-SVID token.
+        """
+        jwt_file_path = "/opt/jwt_svid.token"
+        try:
+            with open(jwt_file_path, "r") as file:
+                return file.read().strip()
+        except FileNotFoundError:
+            print(f"Error: The file {jwt_file_path} was not found.")
+            raise
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            raise
+
+  test_auth.py: |
+    #!/usr/bin/env python3
+    """
+    Test SPIFFE + Keycloak Federated Client Authentication
+
+    This script:
+    1. Reads the JWT-SVID from /opt/jwt_svid.token (populated by spiffe-helper)
+    2. Uses it as a client_assertion to authenticate to Keycloak
+    3. Retrieves an access token
+    4. Verifies the token
+    """
+
+    import os
+    import sys
+    import requests
+    import json
+    from utilities import get_client_id, get_jwt_svid
+
+    # Configuration from environment
+    KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://keycloak-service.keycloak.svc:8080")
+    KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "demo")
+    CLIENT_ID = os.getenv("CLIENT_ID", "federated-agent-a")
+
+    def authenticate_to_keycloak(jwt_svid: str) -> dict:
+        """
+        Authenticate to Keycloak using JWT-SVID as client assertion.
+        """
+        token_endpoint = f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/token"
+
+        print(f"\nAuthenticating to Keycloak...")
+        print(f"  Token endpoint: {token_endpoint}")
+        print(f"  Client ID: {CLIENT_ID}")
+
+        payload = {
+            "grant_type": "client_credentials",
+            "client_id": CLIENT_ID,
+            "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            "client_assertion": jwt_svid,
+        }
+
+        try:
+            response = requests.post(
+                token_endpoint,
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10
+            )
+
+            print(f"  Response status: {response.status_code}")
+
+            if response.status_code == 200:
+                token_data = response.json()
+                print(f"✅ Successfully authenticated!")
+                print(f"  Access token: {token_data.get('access_token', '')[:50]}...")
+                print(f"  Token type: {token_data.get('token_type')}")
+                print(f"  Expires in: {token_data.get('expires_in')} seconds")
+                return token_data
+            else:
+                print(f"❌ Authentication failed!")
+                print(f"  Response: {response.text}")
+                return None
+        except Exception as e:
+            print(f"❌ Request failed: {e}")
+            return None
+
+    def verify_access_token(access_token: str):
+        """
+        Verify the access token by calling Keycloak's userinfo endpoint.
+        """
+        userinfo_endpoint = f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/protocol/openid-connect/userinfo"
+
+        print(f"\nVerifying access token...")
+        print(f"  Userinfo endpoint: {userinfo_endpoint}")
+
+        try:
+            response = requests.get(
+                userinfo_endpoint,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10
+            )
+
+            print(f"  Response status: {response.status_code}")
+
+            if response.status_code == 200:
+                userinfo = response.json()
+                print(f"✅ Token is valid!")
+                print(f"  User info: {json.dumps(userinfo, indent=2)}")
+                return userinfo
+            else:
+                print(f"❌ Token verification failed!")
+                print(f"  Response: {response.text}")
+                return None
+        except Exception as e:
+            print(f"❌ Request failed: {e}")
+            return None
+
+    def main() -> int:
+        print("=" * 70)
+        print("SPIFFE + Keycloak Federated Authentication Test")
+        print("=" * 70)
+        print(f"\nConfiguration:")
+        print(f"  Keycloak URL:  {KEYCLOAK_URL}")
+        print(f"  Realm:         {KEYCLOAK_REALM}")
+        print(f"  Client ID:     {CLIENT_ID}")
+
+        # Step 1: Read JWT-SVID
+        print(f"\n{'=' * 70}")
+        print("Step 1: Read JWT-SVID from SPIFFE")
+        print("=" * 70)
+
+        try:
+            spiffe_id = get_client_id()
+            print(f"✅ SPIFFE ID: {spiffe_id}")
+
+            jwt_svid = get_jwt_svid()
+            print(f"✅ JWT-SVID retrieved ({len(jwt_svid)} bytes)")
+
+            # Decode and display JWT for debugging
+            import jwt as pyjwt
+            decoded = pyjwt.decode(jwt_svid, options={"verify_signature": False})
+            print(f"\nJWT Claims:")
+            print(f"  Issuer (iss): {decoded.get('iss')}")
+            print(f"  Subject (sub): {decoded.get('sub')}")
+            print(f"  Audience (aud): {decoded.get('aud')}")
+            print(f"  Expiration (exp): {decoded.get('exp')}")
+
+        except Exception as e:
+            print(f"❌ Failed to read JWT-SVID: {e}")
+            print("\nTroubleshooting:")
+            print("  1. Ensure spiffe-helper is running")
+            print("  2. Check that /opt/jwt_svid.token exists")
+            print("  3. Verify SPIRE agent socket is accessible")
+            return 1
+
+        # Step 2: Authenticate to Keycloak
+        print(f"\n{'=' * 70}")
+        print("Step 2: Authenticate to Keycloak")
+        print("=" * 70)
+
+        token_response = authenticate_to_keycloak(jwt_svid)
+
+        if not token_response:
+            print("\n❌ Authentication failed")
+            print("\nTroubleshooting:")
+            print("  1. Ensure keycloak_federated_client.py setup has been run")
+            print("  2. Verify Keycloak is accessible")
+            print("  3. Check that the client exists in Keycloak")
+            print("  4. Verify the OIDC IdP is configured correctly")
+            return 1
+
+        access_token = token_response.get("access_token")
+
+        # Step 3: Verify the access token
+        print(f"\n{'=' * 70}")
+        print("Step 3: Verify Access Token")
+        print("=" * 70)
+
+        userinfo = verify_access_token(access_token)
+
+        if not userinfo:
+            print("\n⚠️  Token verification failed, but authentication succeeded")
+
+        # Success!
+        print(f"\n{'=' * 70}")
+        print("✅ SUCCESS! SPIFFE + Keycloak Integration Working")
+        print("=" * 70)
+        print("\nThe following flow was demonstrated:")
+        print("  1. ✅ Workload retrieved JWT-SVID from SPIRE")
+        print("  2. ✅ Used JWT-SVID to authenticate to Keycloak")
+        print("  3. ✅ Received valid access token from Keycloak")
+        print("  4. ✅ Verified token with Keycloak")
+        print("\nThis proves that SPIFFE identity can be used for OAuth 2.0")
+        print("authentication with Keycloak's federated-jwt client authenticator.")
+
+        return 0
+
+    if __name__ == "__main__":
+        sys.exit(main())

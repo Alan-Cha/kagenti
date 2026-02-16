@@ -84,6 +84,10 @@ charts:
   ####################################################################
   spire:
     enabled: true
+    values:
+      global:
+        spire:
+          jwtIssuer: "http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local"
 
 kind_images_preload: false
 # docker or podman
