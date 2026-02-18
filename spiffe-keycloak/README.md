@@ -1,12 +1,14 @@
-# SPIFFE + Keycloak Federated Authentication Demo
+# SPIFFE + Keycloak Federated Client Authentication
 
-This demo demonstrates how to use SPIFFE identities from SPIRE for OAuth 2.0 authentication with Keycloak using the **federated-jwt client authenticator**.
+This directory contains scripts and configurations for testing SPIFFE JWT-SVID authentication with Keycloak's federated client authentication feature.
 
 ## Overview
 
-The integration allows workloads with SPIFFE identities to authenticate to Keycloak without traditional client secrets. Instead, the workload presents a JWT-SVID (issued by SPIRE) as proof of identity.
+The goal is to enable workloads with SPIFFE identities (issued by SPIRE) to authenticate to Keycloak using JWT-SVIDs as client credentials, without needing traditional client secrets.
 
-### Authentication Flow
+**Status**: ⚠️ **NOT WORKING** - Configuration is correct but authentication fails (see Known Issues below)
+
+## Authentication Flow
 
 ```
 ┌─────────────┐                    ┌─────────────┐                    ┌──────────────┐
@@ -18,8 +20,7 @@ The integration allows workloads with SPIFFE identities to authenticate to Keycl
        │─────────────────────────────────>│                                   │
        │                                  │                                   │
        │  2. Return JWT-SVID              │                                   │
-       │  (signed by SPIRE, contains      │                                   │
-       │   SPIFFE ID as subject)          │                                   │
+       │  (signed by SPIRE)               │                                   │
        │<─────────────────────────────────│                                   │
        │                                                                      │
        │  3. Token request with JWT-SVID as client_assertion                  │
@@ -31,261 +32,308 @@ The integration allows workloads with SPIFFE identities to authenticate to Keycl
        │─────────────────────────────────────────────────────────────────────>│
        │                                                                      │
        │                                  │  4. Keycloak validates JWT-SVID  │
-       │                                  │     against SPIRE OIDC Discovery │
-       │                                  │     Provider (jwks_uri)          │
+       │                                  │     ❌ FAILS HERE!                │
        │                                                                      │
-       │  5. Return access token                                              │
+       │  5. ❌ 401 Unauthorized                                              │
        │<─────────────────────────────────────────────────────────────────────│
-       │                                                                      │
 ```
 
 ## Prerequisites
 
-1. **Kagenti deployed** with SPIRE and Keycloak installed
-2. **Keycloak version 26.5.2+** with features `client-auth-federated:v1,spiffe:v1` enabled
-3. **Python 3.11+** for running setup and test scripts
+- Keycloak 26.5.2+ with preview features enabled:
+  - `client-auth-federated:v1`
+  - `spiffe:v1`
+- SPIRE server with OIDC Discovery Provider deployed
+- Python 3.11+ with `python-keycloak` package
 
-## Files
+## Quick Start
 
-- `keycloak_statefulset.yaml` - Modified Keycloak deployment with required features enabled
-- `keycloak_federated_client.py` - Provisions Keycloak realm, OIDC IdP, and federated client
-- `test_spiffe_auth.py` - Test script demonstrating the authentication flow
-- `register_workload.sh` - Helper script to register the test workload in SPIRE
-- `requirements.txt` - Python dependencies
+### 1. Configure Keycloak
 
-## Setup Instructions
-
-### Step 1: Ensure Keycloak is Running with Correct Features
-
-The Kagenti Helm chart ([charts/kagenti-deps/templates/keycloak-k8s.yaml](../charts/kagenti-deps/templates/keycloak-k8s.yaml)) already includes the necessary configuration:
-- Keycloak version 26.5.2
-- Features: `client-auth-federated:v1,spiffe:v1`
-
-If you need to update:
+Run the setup script to configure Keycloak with the SPIFFE identity provider:
 
 ```bash
-helm upgrade kagenti-deps charts/kagenti-deps -n kagenti-system
-```
-
-Wait for Keycloak to be ready:
-
-```bash
-kubectl wait --for=condition=ready pod -l app=keycloak -n keycloak --timeout=300s
-```
-
-### Step 2: Install Python Dependencies
-
-```bash
+# From repository root
 cd spiffe-keycloak
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
+python keycloak_federated_client.py
 ```
 
-### Step 3: Run Keycloak Setup
+This script:
+- Creates the `demo` realm (if it doesn't exist)
+- Creates a **SPIFFE** identity provider (NOT OIDC!)
+- Registers a client configured for federated JWT authentication
 
-This creates the demo realm, SPIRE OIDC Identity Provider, and federated client:
+### 2. Deploy Test Workload
+
+Deploy the test pod with SPIFFE workload registration:
 
 ```bash
-python setup3.py
-```
-
-Expected output:
-```
-============================================================
-SPIFFE Federated Client Auth - Keycloak Setup
-============================================================
-
-Keycloak:          http://keycloak.localtest.me:8080
-Realm:             demo
-SPIRE Issuer:      http://spire-oidc.spire.svc.cluster.local
-IdP Alias:         spire-oidc
-Client:            federated-agent-a
-Federated Subject: spiffe://localtest.me/ns/authbridge/sa/agent
-
---- Realm ---
-Realm 'demo' already exists.
-
---- Identity Provider ---
-Identity Provider "spire-oidc" already exists.
-
---- Client ---
-Created client "federated-agent-a" with Signed JWT - Federated.
-
-============================================================
-Setup complete.
-============================================================
-```
-
-### Step 4: Register Workload in SPIRE
-
-The test script expects a workload with SPIFFE ID `spiffe://localtest.me/ns/authbridge/sa/agent`.
-
-**Option A: Use the helper script (recommended)**:
-
-```bash
-chmod +x register_workload.sh
+kubectl apply -f client_deployment.yaml
 ./register_workload.sh
 ```
 
-The script will:
-1. Find your SPIRE installation and agents
-2. Determine the correct parent ID automatically
-3. Create a registration entry with `unix:uid` selector for local testing
-4. Verify the registration
-
-**Option B: Manual registration**:
-
-If you prefer to register manually or need to customize the selectors:
+### 3. Run Authentication Test
 
 ```bash
-# First, find the parent agent SPIFFE ID
-kubectl exec -n zero-trust-workload-identity-manager spire-server-0 -- \
-  /opt/spire/bin/spire-server agent list
-
-# Then create the entry (replace PARENT_ID with the actual agent SPIFFE ID)
-kubectl exec -n zero-trust-workload-identity-manager spire-server-0 -- \
-  /opt/spire/bin/spire-server entry create \
-  -spiffeID spiffe://localtest.me/ns/authbridge/sa/agent \
-  -parentID <PARENT_ID_FROM_ABOVE> \
-  -selector unix:uid:$(id -u)
-
-# Verify the entry
-kubectl exec -n zero-trust-workload-identity-manager spire-server-0 -- \
-  /opt/spire/bin/spire-server entry show
+./run_test.sh test
 ```
 
-**Note**: The selector `unix:uid:$(id -u)` allows your local user to obtain this identity. For Kubernetes pods, you'd use `k8s:ns:authbridge` and `k8s:sa:agent` selectors instead.
+## Key Configuration Details
 
-### Step 5: Set Up SPIRE Agent Socket
+### ⚠️ CRITICAL: Use SPIFFE Provider, Not OIDC!
 
-The test script needs access to the SPIRE Workload API socket. For local testing:
+**You MUST use `providerId: "spiffe"`, NOT `"oidc"`**
 
-```bash
-# Port-forward the SPIRE agent socket
-kubectl port-forward -n zero-trust-workload-identity-manager daemonset/spire-agent 8081:8081 &
-
-# Set environment variable
-export SPIFFE_ENDPOINT_SOCKET="unix:///var/run/spire/sockets/agent.sock"
+```json
+{
+  "alias": "spire-spiffe",
+  "providerId": "spiffe",  // NOT "oidc"!
+  "enabled": true,
+  "config": {
+    "trustDomain": "spiffe://localtest.me",
+    "bundleEndpoint": "http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local/keys",
+    "validateSignature": "true"
+  }
+}
 ```
 
-**For testing in a pod**: Mount the socket volume from the SPIRE agent DaemonSet.
+**Key Fields:**
+- `trustDomain`: Must be in `spiffe://` format
+- `bundleEndpoint`: NOT `jwksUrl`! This is the SPIFFE-specific field name for the Keycloak UI
 
-### Step 6: Run the Test Script
+### Client Configuration
 
-```bash
-python test_spiffe_auth.py
+```json
+{
+  "clientId": "federated-agent-a",
+  "clientAuthenticatorType": "federated-jwt",
+  "serviceAccountsEnabled": true,
+  "attributes": {
+    "jwt.credential.issuer": "spire-spiffe",  // References the IdP alias
+    "jwt.credential.sub": "spiffe://localtest.me/ns/authbridge/sa/agent"
+  }
+}
 ```
 
-Expected output:
+## Known Issues
 
+### 🔴 Issue: Authentication Fails Despite Correct Configuration
+
+**Symptom:**
 ```
-======================================================================
-SPIFFE + Keycloak Federated Authentication Test
-======================================================================
-
-Configuration:
-  Keycloak:         http://keycloak.localtest.me:8080
-  Realm:            demo
-  Client ID:        federated-agent-a
-  Expected SPIFFE:  spiffe://localtest.me/ns/authbridge/sa/agent
-  Workload Socket:  unix:///var/run/spire/sockets/agent.sock
-
-======================================================================
-Step 1: Fetch JWT-SVID from SPIRE
-======================================================================
-Fetching JWT-SVID from SPIRE...
-  Expected SPIFFE ID: spiffe://localtest.me/ns/authbridge/sa/agent
-  Audience: http://keycloak.localtest.me:8080/realms/demo
-[OK] SPIFFE ID matches: spiffe://localtest.me/ns/authbridge/sa/agent
-[OK] JWT-SVID retrieved (XXX bytes)
-
-======================================================================
-Step 2: Authenticate to Keycloak
-======================================================================
-Authenticating to Keycloak...
-  Token endpoint: http://keycloak.localtest.me:8080/realms/demo/protocol/openid-connect/token
-  Client ID: federated-agent-a
-  Response status: 200
-[OK] Successfully authenticated!
-  Access token: eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA...
-  Token type: Bearer
-  Expires in: 300 seconds
-
-======================================================================
-Step 3: Verify Access Token
-======================================================================
-Verifying access token...
-[OK] Token is valid!
-
-======================================================================
-SUCCESS! SPIFFE + Keycloak Integration Working
-======================================================================
-
-The following flow was demonstrated:
-  1. ✓ Workload retrieved JWT-SVID from SPIRE
-  2. ✓ Used JWT-SVID to authenticate to Keycloak
-  3. ✓ Received valid access token from Keycloak
-  4. ✓ Verified token with Keycloak userinfo endpoint
-
-This proves that SPIFFE identity can be used for OAuth 2.0
-authentication with Keycloak's federated-jwt client authenticator.
+Response status: 401
+{"error":"invalid_client","error_description":"Invalid client or Invalid client credentials"}
 ```
 
-## Configuration Details
+**Keycloak Log:**
+```
+WARN  [org.keycloak.authentication.ClientAuthenticationFlow]
+Client authentication was attempted did not complete for federated-jwt
+error="invalid_client_credentials"
+client_assertion_issuer="http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local"
+client_assertion_sub="spiffe://localtest.me/ns/authbridge/sa/agent"
+```
 
-### Keycloak Client Configuration
+**Root Cause:**
+The JWT-SVID issued by SPIRE contains:
+- `iss: http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local` (HTTP URL)
 
-The client `federated-agent-a` is configured with:
+But Keycloak's SPIFFE provider appears to expect the issuer to match the trust domain format:
+- Expected: `iss: spiffe://localtest.me` (or derived from trust domain)
 
-- **Client Authenticator Type**: `federated-jwt`
-- **JWT Credential Issuer**: `spire-oidc` (the OIDC IdP alias)
-- **JWT Credential Subject**: `spiffe://localtest.me/ns/authbridge/sa/agent`
+**Status**:
+- ✅ Configuration is correct per Keycloak 26.5.2 documentation
+- ❌ This appears to be a **compatibility gap** between SPIRE's JWT-SVID format and Keycloak's `spiffe:v1` preview feature
+- ⚠️ The `spiffe:v1` feature is still in **preview** and may have incomplete SPIRE support
+- Related GitHub issues:
+  - https://github.com/keycloak/keycloak/issues/41907 - SPIFFE/SPIRE support request
+  - https://github.com/keycloak/keycloak/issues/42634 - Federated client authentication tracking issue
 
-This tells Keycloak to:
-1. Accept JWTs from the SPIRE OIDC Discovery Provider
-2. Match the JWT's `sub` claim against the configured SPIFFE ID
-3. Grant access if validation succeeds
+### Why the `jti` Claim Doesn't Matter
 
-### SPIRE OIDC Discovery Provider
+Initially, we thought the missing `jti` (JWT ID) claim was the issue:
+- ❌ SPIRE JWT-SVIDs don't include `jti` by design
+- ✅ Keycloak's **SPIFFE provider** is designed to work **without** `jti`
+- ✅ When using OIDC provider, Keycloak requires `jti` for replay protection
+- ✅ The SPIFFE provider type handles this correctly
 
-The OIDC IdP in Keycloak points to:
-- **Issuer**: `http://spire-oidc.spire.svc.cluster.local`
-- **JWKS URL**: `https://spire-oidc.spire.svc.cluster.local/keys`
+**The real issue is the issuer format, not the missing `jti`.**
 
-**Note**: The protocol mismatch (http → https in jwksUrl) is intentional based on Keycloak OIDC IdP requirements.
+## Investigation Timeline
+
+### What We Tried
+
+1. **❌ Used OIDC Provider** (Wrong approach)
+   - Configuration: `providerId: "oidc"`
+   - Error: "Issuer does not support client assertions"
+   - Cause: Keycloak was checking SPIRE's discovery document for OAuth2 capabilities
+
+2. **✅ Switched to SPIFFE Provider** (Correct approach)
+   - Configuration: `providerId: "spiffe"`
+   - Error changed to: "Client authentication did not complete"
+   - Progress! SPIFFE provider accepts JWTs without `jti`
+
+3. **✅ Added `bundleEndpoint` Field**
+   - Required field for SPIFFE provider (not `jwksUrl`)
+   - Configuration is now correct per Keycloak documentation
+
+4. **✅ Verified All Configuration**
+   - Trust domain: `spiffe://localtest.me` ✓
+   - Bundle endpoint accessible ✓
+   - Client configured with `federated-jwt` ✓
+   - Preview features enabled ✓
+
+5. **❌ Still Failing**
+   - Issuer format mismatch between SPIRE (HTTP URL) and Keycloak expectations
+   - This appears to be a limitation in Keycloak's preview implementation
+
+## Alternative Approaches to Investigate
+
+### Option 1: Configure SPIRE to Use SPIFFE URI as Issuer
+
+Check if SPIRE can be configured to issue JWTs with `iss: spiffe://localtest.me` instead of the HTTP URL.
+
+**Relevant SPIRE Configuration:**
+```yaml
+# In deployments/envs/dev_values.yaml
+spire:
+  enabled: true
+  values:
+    global:
+      spire:
+        jwtIssuer: "http://spire-spiffe-oidc-discovery-provider..."
+        # Can this be changed to: "spiffe://localtest.me" ?
+```
+
+**Risks:**
+- May break JWT signature validation
+- JWKS endpoint expects HTTP(S) URLs in standard OIDC format
+- SPIFFE spec may not allow SPIFFE URIs as issuers in JWT-SVIDs
+
+### Option 2: Wait for Keycloak Fix
+
+Since `spiffe:v1` is a preview feature, this might be resolved in future Keycloak releases.
+
+**Action:**
+- Monitor Keycloak GitHub issues
+- Test with newer Keycloak versions when available
+- File a detailed bug report if not already tracked
+
+### Option 3: Use SPIFFE X.509 SVIDs Instead
+
+The federated authentication feature also supports X.509 certificates. SPIFFE X.509 SVIDs might have better support.
+
+**Pros:**
+- X.509 authentication is more mature
+- No issuer format issues
+
+**Cons:**
+- More complex setup (certificate management)
+- Different trust model
+
+### Option 4: Custom Keycloak Authenticator Extension
+
+Develop a custom Keycloak authenticator SPI implementation that:
+- Accepts SPIRE's HTTP issuer format
+- Maps it to the SPIFFE trust domain
+- Performs JWT validation directly against SPIRE's JWKS
+
+**Effort:** High, requires Java development
+
+### Option 5: Modify SPIRE OIDC Discovery Provider
+
+Create a wrapper/proxy that:
+- Intercepts JWT-SVID issuance
+- Modifies the `iss` claim to match Keycloak expectations
+- Maintains compatibility with signature validation
+
+**Effort:** Medium, requires understanding SPIRE internals
+
+## Files
+
+### Core Scripts
+- `keycloak_federated_client.py` - ✅ Main setup script (configures SPIFFE provider)
+- `client_deployment.yaml` - Test workload deployment with SPIFFE helper
+- `register_workload.sh` - Registers workload with SPIRE
+- `run_test.sh` - Wrapper script for deployment and testing
+- `utilties.py` - Helper functions for JWT-SVID handling
+
+### Documentation
+- `README.md` - This file
+- `TEST_GUIDE.md` - Detailed testing instructions
+- `SPIRE_CONCEPTS.md` - SPIFFE/SPIRE concepts reference
+
+### Configuration (Legacy/Reference)
+- `keycloak_statefulset.yaml` - Modified Keycloak deployment (if needed)
+- `test_deployment.yaml` - Alternative test deployment
+- `spire-oidc-httproute.yaml` - HTTPRoute for SPIRE OIDC discovery
 
 ## Troubleshooting
 
-### "No JWT-SVIDs returned from SPIRE"
+### Check Keycloak Logs
+```bash
+kubectl logs -n keycloak pod/keycloak-0 --since=5m | grep -E "CLIENT|federated|ERROR"
+```
 
-- Verify SPIRE agent is running: `kubectl get pods -n zero-trust-workload-identity-manager`
-- Check workload API socket: `ls -la /var/run/spire/sockets/agent.sock`
-- Verify registration entry exists: `kubectl exec ... spire-server entry show`
+### Check SPIRE Logs
+```bash
+kubectl logs -n spire-server deployment/spire-server
+```
 
-### "Authentication failed"
+### Verify JWT-SVID Claims
+```bash
+kubectl exec -n authbridge deployment/spiffe-keycloak-test -c test-client -- \
+  python3 -c "
+import jwt
+with open('/opt/jwt_svid.token', 'r') as f:
+    token = f.read().strip()
+    claims = jwt.decode(token, options={'verify_signature': False})
+    print('JWT Claims:')
+    for k, v in claims.items():
+        print(f'  {k}: {v}')
+"
+```
 
-- Ensure `setup3.py` ran successfully
-- Verify Keycloak is accessible: `curl http://keycloak.localtest.me:8080/health`
-- Check Keycloak logs: `kubectl logs -n keycloak keycloak-0`
-- Verify client exists in Keycloak UI at `http://keycloak.localtest.me:8080/admin`
+### Verify Keycloak Configuration
+```bash
+kubectl run keycloak-client --rm -i --image=python:3.11-slim --restart=Never -- bash -c "
+pip install -q python-keycloak && python3 -c \"
+from keycloak import KeycloakAdmin
+import json
 
-### "SPIFFE ID mismatch"
+kc = KeycloakAdmin(
+    server_url='http://keycloak-service.keycloak.svc:8080',
+    username='admin',
+    password='admin',
+    realm_name='demo',
+    user_realm_name='master'
+)
 
-The registration entry in SPIRE doesn't match the expected SPIFFE ID. Update either:
-- The registration entry in SPIRE, OR
-- The `AGENT_SPIFFE_ID` constant in `setup3.py` and `test_spiffe_auth.py`
-
-## Next Steps
-
-1. **Create a Kubernetes pod deployment** that demonstrates the flow in-cluster
-2. **Add RBAC policies** to limit which workloads can authenticate as specific clients
-3. **Integrate with Kagenti agents** to use SPIFFE identities for agent-to-agent authentication
-4. **Add mTLS** between workload and Keycloak using X.509-SVIDs
+# Check SPIFFE IdP
+idps = kc.get_idps()
+spiffe_idp = next((p for p in idps if p.get('alias') == 'spire-spiffe'), None)
+print('SPIFFE IdP Config:')
+print(json.dumps(spiffe_idp, indent=2))
+\"
+"
+```
 
 ## References
 
-- [Keycloak Client Authentication with Federated IdP](https://www.keycloak.org/docs/latest/securing_apps/#_client_credentials_grant)
-- [SPIFFE Workload API](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE_Workload_API.md)
-- [SPIRE OIDC Discovery Provider](https://spiffe.io/docs/latest/keyless/oidc-federation-spec/)
-- [OAuth 2.0 JWT Bearer Token Profiles](https://datatracker.ietf.org/doc/html/rfc7523)
+- [Keycloak Federated Client Authentication Blog](https://www.keycloak.org/2026/01/federated-client-authentication)
+- [Keycloak Server Admin Guide - SPIFFE](https://www.keycloak.org/docs/latest/server_admin/index.html)
+- [Keycloak GitHub Issue #41907](https://github.com/keycloak/keycloak/issues/41907) - SPIFFE/SPIRE support
+- [Keycloak GitHub Issue #42634](https://github.com/keycloak/keycloak/issues/42634) - Federated auth tracking
+- [SPIFFE Specification](https://github.com/spiffe/spiffe/blob/main/standards/SPIFFE.md)
+- [SPIRE Documentation](https://spiffe.io/docs/latest/spire-about/)
+
+## Contributing
+
+If you find a solution or workaround, please update this README and submit a PR!
+
+## Questions?
+
+- Check Keycloak logs for detailed error messages
+- Enable Keycloak debug logging for more details
+- Review the GitHub issues linked above for updates
+- Check SPIRE configuration and JWKS endpoint accessibility

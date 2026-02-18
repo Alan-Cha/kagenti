@@ -1,17 +1,23 @@
 """
-setup3.py
+keycloak_federated_client.py
 
 Provision Keycloak for SPIFFE Federated Client Authentication:
 
 - Ensures the target realm exists.
-- Ensures an OIDC Identity Provider pointing to the SPIRE OIDC Discovery Provider exists.
-- Registers (or reuses) a client configured with the "federated-jwt" authenticator,
+- Creates a SPIFFE Identity Provider (not OIDC!) pointing to SPIRE.
+- Registers a client configured with the "federated-jwt" authenticator,
   mapping the SPIFFE ID as the federated subject.
 
 This script is idempotent.
 
-NOTE: Federated client auth is a preview feature in Keycloak 26.5.2.
-Keycloak must be started with:  --features=preview  (or --features=federated-client-auth)
+IMPORTANT:
+- Uses SPIFFE provider type (providerId="spiffe"), not OIDC
+- Requires Keycloak 26+ with preview features enabled
+- Keycloak must be started with: --features=client-auth-federated:v1,spiffe:v1
+
+Known Issue:
+- As of Keycloak 26.5.2, authentication still fails with "Client authentication did not complete"
+- This appears to be an issuer format mismatch between SPIRE (HTTP URL) and Keycloak expectations
 """
 
 from keycloak import KeycloakAdmin, KeycloakPostError, KeycloakGetError
@@ -23,13 +29,14 @@ KEYCLOAK_REALM = "demo"
 KEYCLOAK_ADMIN_USERNAME = "admin"
 KEYCLOAK_ADMIN_PASSWORD = "admin"
 
-# SPIRE OIDC Discovery Provider configuration
-# Issuer must match the JWT-SVID iss claim
-# Using internal cluster URL so Keycloak can reach it from inside the cluster
-SPIRE_ISSUER = "http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local"
-# JWKS URL - use cluster-internal HTTP endpoint
-SPIRE_JWKS_URL = "http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local/keys"
-IDP_ALIAS = "spire-oidc"
+# SPIFFE Trust Domain (matches SPIRE configuration)
+SPIFFE_TRUST_DOMAIN = "spiffe://localtest.me"
+
+# SPIFFE Bundle Endpoint - JWKS URL for validating JWT-SVIDs
+# Must be accessible from inside the Kubernetes cluster
+SPIFFE_BUNDLE_ENDPOINT = "http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local/keys"
+
+IDP_ALIAS = "spire-spiffe"
 
 # SPIFFE ID for the agent pod
 AGENT_SPIFFE_ID = "spiffe://localtest.me/ns/authbridge/sa/agent"
@@ -57,29 +64,27 @@ def get_or_create_realm(keycloak_admin: KeycloakAdmin, realm_name: str) -> None:
         raise
 
 
-def ensure_oidc_idp(kc: KeycloakAdmin, alias: str, issuer: str, jwks_url: str) -> None:
+def ensure_spiffe_idp(kc: KeycloakAdmin, alias: str, trust_domain: str, bundle_endpoint: str) -> None:
     """
-    Create or update an OIDC Identity Provider pointing at the
-    SPIRE OIDC Discovery Provider. Idempotent.
+    Create or update a SPIFFE Identity Provider. Idempotent.
+
+    IMPORTANT: Uses providerId="spiffe", NOT "oidc"!
+    This is critical for SPIFFE JWT-SVID authentication.
 
     Args:
         kc: KeycloakAdmin instance
-        alias: Identity Provider alias
-        issuer: Issuer URL (must match JWT iss claim)
-        jwks_url: URL to fetch JWKS (can be cluster-internal)
+        alias: Identity Provider alias (e.g., "spire-spiffe")
+        trust_domain: SPIFFE trust domain (e.g., "spiffe://localtest.me")
+        bundle_endpoint: URL to SPIFFE bundle/JWKS endpoint
     """
     idp_payload = {
         "alias": alias,
-        "providerId": "oidc",
+        "providerId": "spiffe",  # Must be "spiffe", not "oidc"!
         "enabled": True,
         "config": {
-            "issuer": issuer,
-            "useJwksUrl": "true",
-            "jwksUrl": jwks_url,
-            # Temporarily disable signature validation to isolate the discovery issue
-            "validateSignature": "false",
-            # Enable this IdP for federated client authentication
-            "clientAssertionSigningAlg": "RS256",
+            "trustDomain": trust_domain,  # Must be in spiffe:// format
+            "bundleEndpoint": bundle_endpoint,  # Key field for SPIFFE provider
+            "validateSignature": "true",
         },
     }
 
@@ -88,42 +93,38 @@ def ensure_oidc_idp(kc: KeycloakAdmin, alias: str, issuer: str, jwks_url: str) -
         existing_idp = next((p for p in idps if p.get("alias") == alias), None)
 
         if existing_idp:
-            # Check if issuer, JWKS URL, or client assertion support needs updating
-            existing_issuer = existing_idp.get("config", {}).get("issuer")
-            existing_jwks = existing_idp.get("config", {}).get("jwksUrl")
-            existing_client_assertion_alg = existing_idp.get("config", {}).get("clientAssertionSigningAlg")
+            # Check if configuration needs updating
+            existing_trust_domain = existing_idp.get("config", {}).get("trustDomain")
+            existing_bundle_endpoint = existing_idp.get("config", {}).get("bundleEndpoint")
 
-            if (existing_issuer == issuer and existing_jwks == jwks_url and
-                existing_client_assertion_alg == "RS256"):
-                print(f'Identity Provider "{alias}" already exists with correct configuration.')
+            if (existing_trust_domain == trust_domain and
+                existing_bundle_endpoint == bundle_endpoint):
+                print(f'SPIFFE Identity Provider "{alias}" already exists with correct configuration.')
                 return
             else:
-                print(f'Updating Identity Provider "{alias}":')
-                if existing_issuer != issuer:
-                    print(f'  Issuer - Old: {existing_issuer}')
-                    print(f'           New: {issuer}')
-                if existing_jwks != jwks_url:
-                    print(f'  JWKS URL - Old: {existing_jwks}')
-                    print(f'             New: {jwks_url}')
-                if existing_client_assertion_alg != "RS256":
-                    print(f'  Client Assertion Alg - Old: {existing_client_assertion_alg}')
-                    print(f'                         New: RS256')
+                print(f'Updating SPIFFE Identity Provider "{alias}":')
+                if existing_trust_domain != trust_domain:
+                    print(f'  Trust Domain - Old: {existing_trust_domain}')
+                    print(f'                 New: {trust_domain}')
+                if existing_bundle_endpoint != bundle_endpoint:
+                    print(f'  Bundle Endpoint - Old: {existing_bundle_endpoint}')
+                    print(f'                    New: {bundle_endpoint}')
                 kc.update_idp(alias, idp_payload)
-                print(f'Identity Provider "{alias}" updated.')
+                print(f'SPIFFE Identity Provider "{alias}" updated.')
                 return
     except KeycloakGetError as e:
         print(f"Warning: could not list IdPs: {e}. Attempting to create.")
 
     try:
         kc.create_idp(idp_payload)
-        print(f'Created OIDC Identity Provider "{alias}" with issuer "{issuer}".')
+        print(f'Created SPIFFE Identity Provider "{alias}" with trust domain "{trust_domain}".')
     except KeycloakPostError as e:
         if e.response_code == 409:
             print(f'Identity Provider "{alias}" already exists (409).')
             # Try to update it
             try:
                 kc.update_idp(alias, idp_payload)
-                print(f'Updated Identity Provider "{alias}" with new issuer.')
+                print(f'Updated SPIFFE Identity Provider "{alias}".')
             except Exception as update_err:
                 print(f'Could not update IdP: {update_err}')
             return
@@ -182,13 +183,14 @@ def main() -> int:
     print("=" * 60)
     print("SPIFFE Federated Client Auth - Keycloak Setup")
     print("=" * 60)
-    print(f"\nKeycloak:          {KEYCLOAK_URL}")
-    print(f"Realm:             {KEYCLOAK_REALM}")
-    print(f"SPIRE Issuer:      {SPIRE_ISSUER}")
-    print(f"SPIRE JWKS URL:    {SPIRE_JWKS_URL}")
-    print(f"IdP Alias:         {IDP_ALIAS}")
-    print(f"Client:            {CLIENT_NAME}")
-    print(f"Federated Subject: {AGENT_SPIFFE_ID}")
+    print(f"\nKeycloak:           {KEYCLOAK_URL}")
+    print(f"Realm:              {KEYCLOAK_REALM}")
+    print(f"Trust Domain:       {SPIFFE_TRUST_DOMAIN}")
+    print(f"Bundle Endpoint:    {SPIFFE_BUNDLE_ENDPOINT}")
+    print(f"IdP Alias:          {IDP_ALIAS}")
+    print(f"IdP Type:           spiffe (NOT oidc)")
+    print(f"Client:             {CLIENT_NAME}")
+    print(f"Federated Subject:  {AGENT_SPIFFE_ID}")
 
     # Connect to master realm
     print(f"\nConnecting to Keycloak...")
@@ -204,6 +206,8 @@ def main() -> int:
         print(f"Failed to connect to Keycloak: {e}")
         print("\nMake sure Keycloak is running and accessible at:")
         print(f"  {KEYCLOAK_URL}")
+        print("\nIf running in Kubernetes, you may need port-forwarding:")
+        print(f"  kubectl port-forward svc/keycloak-service -n keycloak 8080:8080")
         return 1
 
     # Create realm
@@ -219,9 +223,14 @@ def main() -> int:
         user_realm_name="master",
     )
 
-    # Create SPIRE OIDC Identity Provider
-    print(f"\n--- Identity Provider ---")
-    ensure_oidc_idp(kc, alias=IDP_ALIAS, issuer=SPIRE_ISSUER, jwks_url=SPIRE_JWKS_URL)
+    # Create SPIFFE Identity Provider (NOT OIDC!)
+    print(f"\n--- SPIFFE Identity Provider ---")
+    ensure_spiffe_idp(
+        kc,
+        alias=IDP_ALIAS,
+        trust_domain=SPIFFE_TRUST_DOMAIN,
+        bundle_endpoint=SPIFFE_BUNDLE_ENDPOINT
+    )
 
     # Register client with federated auth configured
     print(f"\n--- Client ---")
