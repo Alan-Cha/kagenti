@@ -9,8 +9,12 @@ Demonstrates SPIFFE + Keycloak federated authentication:
 
 This script assumes:
 - SPIRE agent is running and accessible via the Workload API socket
-- setup3.py has been run to configure Keycloak
+- keycloak_federated_client.py has been run to configure Keycloak
 - The workload has been registered in SPIRE with the correct SPIFFE ID
+
+IMPORTANT:
+- CLIENT_ID MUST be the full SPIFFE ID (not a simple name)
+- client_assertion_type MUST be jwt-spiffe (not jwt-bearer)
 """
 
 import sys
@@ -18,11 +22,12 @@ import os
 import requests
 from spiffe import WorkloadApiClient
 
-# Configuration - match setup3.py
+# Configuration - match keycloak_federated_client.py
 KEYCLOAK_URL = "http://keycloak.localtest.me:8080"
 KEYCLOAK_REALM = "demo"
-CLIENT_ID = "federated-agent-a"
+# CRITICAL: For SPIFFE authentication, client_id MUST be the full SPIFFE ID!
 AGENT_SPIFFE_ID = "spiffe://localtest.me/ns/authbridge/sa/agent"
+CLIENT_ID = AGENT_SPIFFE_ID  # Use SPIFFE ID as client ID
 
 # SPIRE Workload API socket
 SPIFFE_ENDPOINT_SOCKET = os.getenv(
@@ -109,11 +114,12 @@ def authenticate_to_keycloak(jwt_svid: str, keycloak_url: str, realm: str, clien
     print(f"  Token endpoint: {token_endpoint}")
     print(f"  Client ID: {client_id}")
 
-    # OAuth 2.0 client credentials grant with JWT bearer assertion
+    # OAuth 2.0 client credentials grant with JWT-SVID assertion
+    # CRITICAL: Must use jwt-spiffe assertion type, not jwt-bearer!
     payload = {
         "grant_type": "client_credentials",
         "client_id": client_id,
-        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
         "client_assertion": jwt_svid,
     }
 
@@ -228,11 +234,13 @@ def main() -> int:
             if not token_response:
                 print("\n[FATAL] Authentication failed")
                 print("\nTroubleshooting:")
-                print("  1. Ensure setup3.py has been run successfully")
+                print("  1. Ensure keycloak_federated_client.py has been run successfully")
                 print("  2. Verify Keycloak is accessible:")
                 print(f"     curl {KEYCLOAK_URL}/health")
-                print("  3. Check that the client exists in Keycloak")
-                print("  4. Verify the OIDC IdP is configured correctly")
+                print("  3. Check that the client exists in Keycloak with SPIFFE ID as clientId")
+                print("  4. Verify the SPIFFE IdP is configured correctly (not OIDC!)")
+                print("  5. Ensure SPIRE is configured with jwtIssuer: 'spiffe://localtest.me'")
+                print("  6. Verify SPIRE OIDC discovery provider has set_key_use: true")
                 return 1
 
             access_token = token_response.get("access_token")

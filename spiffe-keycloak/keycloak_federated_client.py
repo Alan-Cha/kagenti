@@ -14,10 +14,10 @@ IMPORTANT:
 - Uses SPIFFE provider type (providerId="spiffe"), not OIDC
 - Requires Keycloak 26+ with preview features enabled
 - Keycloak must be started with: --features=client-auth-federated:v1,spiffe:v1
-
-Known Issue:
-- As of Keycloak 26.5.2, authentication still fails with "Client authentication did not complete"
-- This appears to be an issuer format mismatch between SPIRE (HTTP URL) and Keycloak expectations
+- SPIRE must be configured with jwtIssuer="spiffe://localtest.me"
+- SPIRE OIDC discovery provider must have set_key_use=true
+- Client ID must be the full SPIFFE ID (not a simple name)
+- Client assertion type must be "jwt-spiffe" (not "jwt-bearer")
 """
 
 from keycloak import KeycloakAdmin, KeycloakPostError, KeycloakGetError
@@ -41,7 +41,10 @@ IDP_ALIAS = "spire-spiffe"
 # SPIFFE ID for the agent pod
 AGENT_SPIFFE_ID = "spiffe://localtest.me/ns/authbridge/sa/agent"
 
-CLIENT_NAME = "federated-agent-a"
+# IMPORTANT: Client ID MUST be the full SPIFFE ID for SPIFFE provider!
+# This is different from traditional OAuth where client IDs are simple names
+CLIENT_ID = AGENT_SPIFFE_ID  # Use SPIFFE ID as client ID
+CLIENT_NAME = "SPIFFE Agent"  # Display name only
 
 
 def get_or_create_realm(keycloak_admin: KeycloakAdmin, realm_name: str) -> None:
@@ -129,6 +132,55 @@ def ensure_spiffe_idp(kc: KeycloakAdmin, alias: str, trust_domain: str, bundle_e
                 print(f'Could not update IdP: {update_err}')
             return
         raise
+
+
+def cleanup_duplicate_clients(kc: KeycloakAdmin, idp_alias: str, federated_subject: str) -> None:
+    """
+    Clean up duplicate clients that have the same federated issuer and subject.
+
+    Keycloak will fail authentication with "Multiple clients matches attributes" if
+    there are multiple clients with the same jwt.credential.issuer and jwt.credential.sub.
+
+    This function finds and removes any duplicate clients, keeping only clients that
+    use the SPIFFE ID as their clientId (the correct configuration).
+
+    Args:
+        kc: KeycloakAdmin instance
+        idp_alias: The identity provider alias to match
+        federated_subject: The SPIFFE ID subject to match
+    """
+    try:
+        clients = kc.get_clients()
+        duplicates = []
+
+        for client in clients:
+            attrs = client.get("attributes", {})
+            if (attrs.get("jwt.credential.issuer") == idp_alias and
+                attrs.get("jwt.credential.sub") == federated_subject):
+                client_id = client.get("clientId")
+                # Keep clients that use SPIFFE ID as clientId, remove others
+                if client_id != federated_subject:
+                    duplicates.append({
+                        "id": client.get("id"),
+                        "clientId": client_id
+                    })
+
+        if duplicates:
+            print(f'\n⚠️  Found {len(duplicates)} duplicate client(s) with same federated attributes:')
+            for dup in duplicates:
+                print(f'   - "{dup["clientId"]}" (will be deleted)')
+
+            for dup in duplicates:
+                try:
+                    kc.delete_client(dup["id"])
+                    print(f'   ✅ Deleted duplicate client: {dup["clientId"]}')
+                except Exception as e:
+                    print(f'   ❌ Could not delete {dup["clientId"]}: {e}')
+        else:
+            print('✅ No duplicate clients found')
+
+    except Exception as e:
+        print(f'Warning: Could not check for duplicate clients: {e}')
 
 
 def register_federated_client(
@@ -232,12 +284,16 @@ def main() -> int:
         bundle_endpoint=SPIFFE_BUNDLE_ENDPOINT
     )
 
+    # Clean up any duplicate clients first
+    print(f"\n--- Checking for Duplicate Clients ---")
+    cleanup_duplicate_clients(kc, IDP_ALIAS, AGENT_SPIFFE_ID)
+
     # Register client with federated auth configured
     print(f"\n--- Client ---")
     try:
         register_federated_client(
             kc,
-            client_id=CLIENT_NAME,
+            client_id=CLIENT_ID,  # Must be the SPIFFE ID!
             client_name=CLIENT_NAME,
             idp_alias=IDP_ALIAS,
             federated_subject=AGENT_SPIFFE_ID,
@@ -251,16 +307,33 @@ def main() -> int:
     print(f"\n{'=' * 60}")
     print("Setup complete. Runtime usage:")
     print(f"{'=' * 60}")
-    print(f"\nThe client '{CLIENT_NAME}' is configured with:")
+    print(f"\nThe client '{CLIENT_ID}' is configured with:")
     print(f"  clientAuthenticatorType:  federated-jwt")
     print(f"  jwt.credential.issuer:   {IDP_ALIAS}")
     print(f"  jwt.credential.sub:      {AGENT_SPIFFE_ID}")
     print(f"\nTo authenticate, the workload sends its JWT-SVID as a client_assertion:")
     print(f"  POST {realm_issuer}/protocol/openid-connect/token")
     print(f"    grant_type=client_credentials")
-    print(f"    client_id={CLIENT_NAME}")
-    print(f"    client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+    print(f"    client_id={CLIENT_ID}")
+    print(f"    client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe")
     print(f"    client_assertion=<JWT-SVID>")
+    print(f"\nIMPORTANT:")
+    print(f"  - client_id MUST be the full SPIFFE ID (matches sub claim)")
+    print(f"  - client_assertion_type MUST be jwt-spiffe, not jwt-bearer")
+    print(f"  - JWT audience MUST match Keycloak's external issuer URL")
+    print(f"\n🔍 TROUBLESHOOTING COMMON ERRORS:")
+    print(f"")
+    print(f"1. 'Multiple clients matches attributes'")
+    print(f"   → Run this script again - it will clean up duplicates")
+    print(f"")
+    print(f"2. 'Token was issued too far in the past'")
+    print(f"   → JWT-SVID is stale, refresh it:")
+    print(f"     kubectl rollout restart deployment/spiffe-keycloak-test -n authbridge")
+    print(f"")
+    print(f"3. 'Client authentication did not complete'")
+    print(f"   → Check SPIRE JWKS has 'use' field:")
+    print(f"     kubectl run test-curl --rm -i --image=curlimages/curl --restart=Never -- \\")
+    print(f"       curl -s http://spire-spiffe-oidc-discovery-provider.spire-server.svc.cluster.local/keys")
 
     return 0
 
