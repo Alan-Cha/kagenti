@@ -86,7 +86,116 @@ You have **two options** to configure SPIRE:
 
   **Note:** Multiple keys are normal - SPIRE maintains old keys during rotation to prevent downtime.
 
+### Step 1.5: 🔴 **CRITICAL** - Reduce JWT TTL for Keycloak Compatibility
+
+**Why this is needed:** This is the **most critical configuration** for reliable authentication!
+
+- Keycloak validates JWT freshness using the `iat` (issued at) claim
+- **Observed behavior:** JWTs older than ~5 minutes trigger error: "Token was issued too far in the past"
+- **SPIRE defaults:**
+  - Issues JWTs with **1-hour TTL** (documented: `default_jwt_svid_ttl: "1h"`)
+  - Refreshes at **~50% of lifetime** (documented) = every ~30 minutes
+- **Result:** JWTs can be 30 minutes old → Keycloak rejects them
+- **Impact:** Authentication works right after pod restart, fails after ~5 minutes
+
+**Solution:** Reduce JWT TTL to 10 minutes so SPIRE refreshes JWTs every ~5 minutes.
+
+#### Configure JWT TTL
+
+Choose one option:
+
+**Option A: Update SPIRE ConfigMap directly (Quick fix for existing clusters)**
+
+- [ ] **Reduce JWT TTL to 10 minutes**:
+  ```bash
+  kubectl get configmap spire-server -n spire-server -o json | \
+    jq '.data["server.conf"] |= (fromjson | .server.default_jwt_svid_ttl = "10m" | tojson)' | \
+    kubectl apply -f -
+  ```
+
+- [ ] **Restart SPIRE components**:
+  ```bash
+  kubectl rollout restart statefulset/spire-server -n spire-server
+  kubectl rollout restart daemonset/spire-agent -n spire-system
+  ```
+
+- [ ] **Verify JWT TTL is updated**:
+  ```bash
+  kubectl get configmap spire-server -n spire-server -o jsonpath='{.data.server\.conf}' | \
+    jq -r . | grep default_jwt_svid_ttl
+  ```
+  Expected output: `"default_jwt_svid_ttl": "10m"`
+
+**Option B: Update Helm Values (For permanent configuration)**
+
+- [ ] **Update SPIRE deployment values** (`deployments/envs/dev_values.yaml`):
+  ```yaml
+  spire:
+    values:
+      spire-server:
+        controllerManager:
+          identities:
+            clusterSPIFFEIDs:
+              default:
+                jwtTTL: "10m"  # 10 minutes instead of default 1h
+  ```
+
+- [ ] **Redeploy via Ansible**:
+  ```bash
+  deployments/ansible/run-install.sh --env dev
+  ```
+
+**How This Works:**
+- SPIRE issues JWTs with **10-minute expiration** (instead of 1 hour)
+- SPIRE automatically refreshes at ~50% TTL = **every ~5 minutes**
+- spiffe-helper detects updates and writes new JWT to file
+- Your application always reads a JWT that's **< 5 minutes old**
+- Keycloak accepts it because it's fresh enough ✅
+
+**Important:** Without this configuration, authentication will be unreliable and fail intermittently!
+
 ### Step 2: Configure Keycloak
+
+**Why this is needed:** Keycloak requires version 26.5.2+ with preview features enabled to support SPIFFE-based federated client authentication.
+
+You have **two options** to configure Keycloak:
+
+#### Option A: Update Helm Values (Recommended for new deployments)
+
+- [ ] **Update Keycloak deployment values** (`deployments/envs/dev_values.yaml`):
+  ```yaml
+  keycloak:
+    enabled: true
+    image:
+      tag: "26.5.2"
+    extraEnv:
+      - name: KC_FEATURES
+        value: "client-auth-federated:v1,spiffe:v1"
+  ```
+
+- [ ] **Redeploy via Ansible**:
+  ```bash
+  deployments/ansible/run-install.sh --env dev
+  ```
+
+#### Option B: Patch Existing Keycloak StatefulSet (For existing deployments)
+
+- [ ] **Run the patch script**:
+  ```bash
+  ./spiffe-keycloak/patch_keycloak_config.sh
+  ```
+
+  This script:
+  - Upgrades Keycloak image to version 26.5.2
+  - Enables preview features: `client-auth-federated:v1,spiffe:v1`
+  - Restarts Keycloak automatically
+  - Creates backup in `/tmp/keycloak-statefulset-backup.yaml` before making changes
+
+- [ ] **Verify Keycloak is ready**:
+  ```bash
+  kubectl get pods -n keycloak
+  # Should show: keycloak-0 pod Running with READY 1/1
+  ```
 
 - [ ] **Port-forward Keycloak** (if needed):
   ```bash

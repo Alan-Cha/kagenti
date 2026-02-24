@@ -91,6 +91,11 @@ data:
     jwt_svids = [{jwt_audience="http://keycloak.localtest.me:8080/realms/demo", jwt_svid_file_name="/opt/jwt_svid.token"}]
     jwt_svid_file_mode = 0644
     include_federated_domains = true
+
+    # Note: spiffe-helper automatically refreshes JWTs when SPIRE provides updates
+    # SPIRE refreshes JWTs at ~50% of their TTL (documented SPIRE behavior)
+    # Current configuration: jwt_svid_ttl = 10 minutes → refreshes every ~5 minutes
+    # This ensures JWTs stay fresh for Keycloak (empirically: rejects JWTs >~5 min old)
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -100,46 +105,70 @@ metadata:
 data:
   utilities.py: |
     import jwt
+    import os
+    import time
+
+    # Keycloak rejects JWTs older than this many seconds
+    # With JWT TTL set to 10 minutes, JWTs refresh every ~5 minutes
+    MAX_JWT_AGE_SECONDS = 300  # 5 minutes
 
     def get_client_id() -> str:
         """
         Read the SVID JWT from file and extract the client ID from the "sub" claim.
         """
         jwt_file_path = "/opt/jwt_svid.token"
-        content = None
         try:
             with open(jwt_file_path, "r") as file:
-                content = file.read()
+                content = file.read().strip()
         except FileNotFoundError:
-            print(f"Error: The file {jwt_file_path} was not found.")
-            raise
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            raise
+            raise Exception(f"JWT-SVID file not found at {jwt_file_path}")
 
-        if content is None or content.strip() == "":
-            raise Exception("No content read from SVID JWT.")
+        if not content:
+            raise Exception("JWT-SVID file is empty")
 
         # Decode JWT to get client ID (SPIFFE ID)
         decoded = jwt.decode(content, options={"verify_signature": False})
         if "sub" not in decoded:
-            raise Exception('SVID JWT does not contain a "sub" claim.')
+            raise Exception('SVID JWT does not contain a "sub" claim')
         return decoded["sub"]
 
     def get_jwt_svid() -> str:
         """
-        Read and return the JWT-SVID token.
+        Read JWT-SVID and verify it's fresh enough for Keycloak.
+        Keycloak rejects JWTs that are "too old" even if they haven't expired.
         """
         jwt_file_path = "/opt/jwt_svid.token"
         try:
             with open(jwt_file_path, "r") as file:
-                return file.read().strip()
+                content = file.read().strip()
         except FileNotFoundError:
-            print(f"Error: The file {jwt_file_path} was not found.")
-            raise
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            raise
+            raise Exception(f"JWT-SVID file not found at {jwt_file_path}")
+
+        if not content:
+            raise Exception("JWT-SVID file is empty")
+
+        # Check JWT age
+        decoded = jwt.decode(content, options={"verify_signature": False})
+        iat = decoded.get('iat')
+        if not iat:
+            raise Exception("JWT-SVID missing 'iat' (issued at) claim")
+
+        current_time = int(time.time())
+        age_seconds = current_time - iat
+        ttl_seconds = decoded.get('exp', 0) - current_time
+
+        print(f"\nJWT-SVID Age Check:")
+        print(f"  Token age: {age_seconds}s ({age_seconds/60:.1f} minutes)")
+        print(f"  Time until expiry: {ttl_seconds}s ({ttl_seconds/60:.1f} minutes)")
+
+        if age_seconds > MAX_JWT_AGE_SECONDS:
+            print(f"\n⚠️  JWT-SVID is older than expected ({age_seconds}s > {MAX_JWT_AGE_SECONDS}s)")
+            print(f"   Keycloak may reject it. SPIRE should refresh JWTs every ~5 minutes.")
+            print(f"   Check spiffe-helper logs or restart the pod for a fresh JWT.")
+            print(f"   Trying authentication anyway...")
+        else:
+            print(f"  ✅ JWT-SVID is fresh enough for Keycloak")
+        return content
 
   test_auth.py: |
     #!/usr/bin/env python3

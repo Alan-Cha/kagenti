@@ -6,7 +6,15 @@ This directory contains scripts and configurations for SPIFFE JWT-SVID authentic
 
 Enables workloads with SPIFFE identities (issued by SPIRE) to authenticate to Keycloak using JWT-SVIDs as client credentials, without traditional client secrets.
 
-**Status**: ✅ **WORKING** (as of 2026-02-18)
+**Status**: ✅ **WORKING** (as of 2026-02-23)
+
+> **⚠️ CRITICAL:** Keycloak hardcodes a **300-second (5-minute)** JWT age threshold in source code.
+> **Required:** Use **5-minute JWT TTL** to ensure JWTs refresh every 2.5 minutes.
+>
+> **Documentation:**
+> - [KEYCLOAK_SOURCE_ANALYSIS.md](KEYCLOAK_SOURCE_ANALYSIS.md) - Source code analysis showing exact 300s threshold
+> - [JWT_TTL_RECOMMENDATION.md](JWT_TTL_RECOMMENDATION.md) - Configuration guide and migration
+> - [EVIDENCE.md](EVIDENCE.md) - Empirical testing results
 
 ## Prerequisites
 
@@ -21,6 +29,8 @@ Enables workloads with SPIFFE identities (issued by SPIRE) to authenticate to Ke
 
 ### 1. Configure SPIRE
 
+#### 1.1. Set JWT Issuer to SPIFFE URI Format
+
 Update your SPIRE deployment values to use SPIFFE URI as JWT issuer:
 
 ```yaml
@@ -33,7 +43,45 @@ spire:
         jwtIssuer: "spiffe://localtest.me"  # Must be SPIFFE URI, not HTTP URL!
 ```
 
-Then ensure SPIRE OIDC discovery provider includes "use" field in JWKS:
+#### 1.2. **CRITICAL: Reduce JWT TTL for Keycloak Compatibility**
+
+Keycloak validates JWT freshness by checking the `iat` (issued at) claim. Based on empirical testing, JWTs older than ~5 minutes are rejected with "Token was issued too far in the past" errors, even if not expired. By default, SPIRE issues JWTs with a 1-hour TTL (documented) and refreshes them at ~50% of lifetime (documented), meaning JWTs can be up to 30 minutes old before refresh.
+
+**Solution: Set JWT TTL to 10 minutes:**
+
+```bash
+# Update SPIRE server configuration
+kubectl get configmap spire-server -n spire-server -o json | \
+  jq '.data["server.conf"] |= (fromjson | .server.default_jwt_svid_ttl = "10m" | tojson)' | \
+  kubectl apply -f -
+
+# Restart SPIRE components to apply changes
+kubectl rollout restart statefulset/spire-server -n spire-server
+kubectl rollout restart daemonset/spire-agent -n spire-system
+```
+
+This configuration:
+- Sets JWT expiration to 10 minutes (instead of 1 hour)
+- SPIRE automatically refreshes JWTs at ~50% of TTL = **every ~5 minutes**
+- Ensures JWTs are always fresh enough for Keycloak (< 5 minutes old)
+
+**Alternative:** You can also configure this in your SPIRE Helm values:
+
+```yaml
+# In deployments/envs/dev_values.yaml
+spire:
+  values:
+    spire-server:
+      controllerManager:
+        identities:
+          clusterSPIFFEIDs:
+            default:
+              jwtTTL: "10m"  # 10 minutes instead of default 1h
+```
+
+#### 1.3. Enable "use" Field in JWKS
+
+Ensure SPIRE OIDC discovery provider includes "use" field in JWKS:
 
 ```bash
 # Add set_key_use to SPIRE OIDC discovery provider config
@@ -41,8 +89,7 @@ kubectl get configmap spire-spiffe-oidc-discovery-provider -n spire-server -o ya
   # ... add "set_key_use": true to the JSON config ...
 kubectl apply -f -
 
-# Restart SPIRE components
-kubectl rollout restart statefulset/spire-server -n spire-server
+# Restart SPIRE OIDC discovery provider
 kubectl rollout restart deployment/spire-spiffe-oidc-discovery-provider -n spire-server
 ```
 
@@ -360,7 +407,7 @@ python spiffe-keycloak/keycloak_federated_client.py
 
 ---
 
-### Obstacle 8: Stale JWT-SVID (Token Issued Too Long Ago)
+### Obstacle 8: JWT-SVID Too Old for Keycloak (Most Critical Issue!)
 
 **Symptom:**
 ```
@@ -368,30 +415,62 @@ python spiffe-keycloak/keycloak_federated_client.py
 ```
 
 **Why It Failed:**
-- The JWT-SVID cached by SPIFFE helper was issued too long ago
-- Keycloak validates the `iat` (issued at) claim and rejects tokens older than a certain threshold
-- This can happen if:
-  - The test pod has been running for a while
-  - The SPIFFE helper hasn't refreshed the token
-  - There's clock skew between SPIRE and Keycloak
+- Keycloak validates JWT freshness using the `iat` (issued at) claim
+- **Empirical observation:** JWTs older than ~5 minutes are rejected with error "Token was issued too far in the past"
+- **SPIRE defaults (documented):**
+  - Issues JWTs with **1-hour TTL** (`default_jwt_svid_ttl: "1h"`)
+  - Refreshes at **~50% of lifetime** = every ~30 minutes
+- This means JWTs can be up to 30 minutes old when used
+- Even though valid (not expired), Keycloak's freshness check rejects them
+- This is a security feature to prevent replay attacks (common OAuth 2.0 practice)
+
+**Why Restarting Pods Only Worked Temporarily:**
+- Restarting gave you a fresh JWT (<1 minute old)
+- But after 5 minutes, authentication started failing again
+- This made the integration seem unreliable
 
 **Solution:**
-✅ Refresh the JWT-SVID by restarting the workload
+✅ **Reduce SPIRE JWT TTL from 1 hour to 10 minutes** (Permanent Fix!)
 
 **How to Fix:**
 ```bash
-# Restart the test pod to get a fresh JWT-SVID
+# Update SPIRE server to issue shorter-lived JWTs
+kubectl get configmap spire-server -n spire-server -o json | \
+  jq '.data["server.conf"] |= (fromjson | .server.default_jwt_svid_ttl = "10m" | tojson)' | \
+  kubectl apply -f -
+
+# Restart SPIRE components
+kubectl rollout restart statefulset/spire-server -n spire-server
+kubectl rollout restart daemonset/spire-agent -n spire-system
+
+# Restart your workload to get a JWT with the new TTL
 kubectl rollout restart deployment/spiffe-keycloak-test -n authbridge
-kubectl rollout status deployment/spiffe-keycloak-test -n authbridge
-
-# Wait for the pod to get a new JWT-SVID
-sleep 10
-
-# Run the test again
-./spiffe-keycloak/run_test.sh test
 ```
 
-**Note:** The SPIFFE helper automatically refreshes JWT-SVIDs before they expire, but if the pod has been idle for a long time, the cached token might be stale.
+**How This Works:**
+1. SPIRE now issues JWTs that expire in **10 minutes** (instead of 1 hour)
+2. SPIRE automatically refreshes JWTs at ~50% of TTL = **every ~5 minutes**
+3. spiffe-helper detects new JWTs and updates the file automatically
+4. Your application always reads a JWT that's **< 5 minutes old**
+5. Keycloak accepts it because it's fresh enough
+
+**Why This is Better Than Workarounds:**
+- ❌ Restarting pods manually: Only works for a few minutes
+- ❌ Sidecar to refresh JWTs: Adds complexity and failure points
+- ✅ **Reduced JWT TTL**: Simple, automatic, reliable, scales to all workloads
+
+**Alternative Configuration (via Helm values):**
+```yaml
+# In deployments/envs/dev_values.yaml
+spire:
+  values:
+    spire-server:
+      controllerManager:
+        identities:
+          clusterSPIFFEIDs:
+            default:
+              jwtTTL: "10m"
+```
 
 ---
 
@@ -431,6 +510,19 @@ spire:
     global:
       spire:
         jwtIssuer: "spiffe://localtest.me"  # ← SPIFFE URI format
+    spire-server:
+      controllerManager:
+        identities:
+          clusterSPIFFEIDs:
+            default:
+              jwtTTL: "10m"  # ← CRITICAL: Short TTL for Keycloak compatibility
+```
+
+**Or via kubectl (for existing deployments):**
+```bash
+kubectl get configmap spire-server -n spire-server -o json | \
+  jq '.data["server.conf"] |= (fromjson | .server.default_jwt_svid_ttl = "10m" | tojson)' | \
+  kubectl apply -f -
 ```
 
 **File:** `spire-spiffe-oidc-discovery-provider` ConfigMap
