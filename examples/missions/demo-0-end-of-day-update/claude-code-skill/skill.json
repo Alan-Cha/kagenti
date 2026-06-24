@@ -1,0 +1,30 @@
+{
+  "name": "mission",
+  "description": "Request and use missions for authorized agent actions",
+  "version": "0.1.0",
+  "commands": [
+    {
+      "name": "request",
+      "description": "Request a mission from Mission Authority",
+      "usage": "/mission request --task \"Read AI safety wiki\" --scope wiki_read --duration-hours 2"
+    },
+    {
+      "name": "status",
+      "description": "Check mission status",
+      "usage": "/mission status --id M-20260618-001"
+    },
+    {
+      "name": "exchange",
+      "description": "Exchange mission token for access token",
+      "usage": "/mission exchange --resource wiki --scope wiki_read"
+    },
+    {
+      "name": "read-wiki",
+      "description": "Read wiki content using mission access token",
+      "usage": "/mission read-wiki --topic ai-safety"
+    }
+  ],
+  "dependencies": [
+    "click>=8.0"
+  ]
+}
