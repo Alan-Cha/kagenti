@@ -1,0 +1,58 @@
+# Keycloak setup configuration for Mission Authority
+#
+# Usage:
+#   python scripts/setup_keycloak.py --config scripts/keycloak_config.yaml
+#   python scripts/setup_keycloak.py --config scripts/keycloak_config.yaml --dry-run
+#
+# The script will:
+#   1. Create (or update) the Mission Authority confidential client in Keycloak
+#   2. Enable service accounts so Mission Authority can authenticate itself
+#   3. Output the client secret and ready-to-use env vars
+#
+# Future migration path (full Keycloak-issued mission tokens):
+#   Uncomment the protocol_mappers section and set enable_token_exchange: true.
+#   This requires Keycloak 22+ with token-exchange feature enabled:
+#     KEYCLOAK_FEATURES=token-exchange (or --features=token-exchange at startup)
+
+keycloak:
+  url: http://localhost:8080          # Change to your Keycloak URL
+  realm: kagenti                       # Realm that Mission Authority lives in
+  admin_username: admin
+  admin_password: admin               # Use --admin-password flag to avoid storing here
+
+mission_authority:
+  client_id: mission-authority
+  client_name: Mission Authority
+  description: "Mission-based authorization service for AI agents (PAP)"
+
+  # Service account settings — required so Mission Authority can call Keycloak APIs
+  service_accounts_enabled: true
+  standard_flow_enabled: false        # No browser login needed
+  direct_access_grants_enabled: false
+
+  # Token exchange (RFC 8693) — requires Keycloak token-exchange feature
+  # When enabled, Mission Authority can call Keycloak to exchange agent tokens.
+  # This is the migration path for Keycloak-issued mission tokens.
+  # enable_token_exchange: false
+
+  # Protocol mappers for Keycloak-issued mission tokens (future use)
+  # Uncomment when migrating to full Keycloak issuance:
+  #
+  # protocol_mappers:
+  #   - name: mission-id
+  #     protocol: openid-connect
+  #     protocolMapper: oidc-usersessionmodel-note-mapper
+  #     config:
+  #       user.session.note: mission_id
+  #       claim.name: mission_id
+  #       jsonType.label: String
+  #       id.token.claim: "true"
+  #       access.token.claim: "true"
+  #   - name: mission-scope
+  #     protocol: openid-connect
+  #     protocolMapper: oidc-usersessionmodel-note-mapper
+  #     config:
+  #       user.session.note: mission_scope
+  #       claim.name: mission_scope
+  #       jsonType.label: JSON
+  #       access.token.claim: "true"

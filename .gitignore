@@ -200,3 +200,8 @@ kagenti/kubectl-kagenti/kubectl-kagenti
 .cves/
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+eventing/*
+!eventing/mission-authority-skeleton
+eventing/mission-authority-skeleton/.venv/
+eventing/mission-authority-skeleton/uv.lock
