@@ -94,7 +94,7 @@ class TestApproveScopeExpansion:
         # Approve it
         approve_resp = await client.post(
             f"/api/v1/missions/{mission_id}/expansions/{expansion_id}/approve",
-            json={"approved_by": "operator@example.com"},
+            json={},
         )
         assert approve_resp.status_code == 200
         body = approve_resp.json()
@@ -124,13 +124,13 @@ class TestApproveScopeExpansion:
 
         await client.post(
             f"/api/v1/missions/{mission_id}/expansions/{expansion_id}/approve",
-            json={"approved_by": "operator@example.com"},
+            json={},
         )
 
         # Second approve should fail
         resp = await client.post(
             f"/api/v1/missions/{mission_id}/expansions/{expansion_id}/approve",
-            json={"approved_by": "operator@example.com"},
+            json={},
         )
         assert resp.status_code == 400
 
@@ -138,7 +138,7 @@ class TestApproveScopeExpansion:
         mission_id, _ = await create_and_approve_mission(client)
         resp = await client.post(
             f"/api/v1/missions/{mission_id}/expansions/EXP-00000000-fake/approve",
-            json={"approved_by": "operator@example.com"},
+            json={},
         )
         assert resp.status_code == 404
 
@@ -159,7 +159,7 @@ class TestDenyScopeExpansion:
 
         deny_resp = await client.post(
             f"/api/v1/missions/{mission_id}/expansions/{expansion_id}/deny",
-            json={"denied_by": "security@example.com", "reason": "Admin scopes not permitted"},
+            json={"reason": "Admin scopes not permitted"},
         )
         assert deny_resp.status_code == 200
         assert deny_resp.json()["status"] == "denied"
@@ -183,11 +183,11 @@ class TestDenyScopeExpansion:
 
         await client.post(
             f"/api/v1/missions/{mission_id}/expansions/{expansion_id}/deny",
-            json={"denied_by": "operator@example.com"},
+            json={},
         )
 
         resp = await client.post(
             f"/api/v1/missions/{mission_id}/expansions/{expansion_id}/deny",
-            json={"denied_by": "operator@example.com"},
+            json={},
         )
         assert resp.status_code == 400

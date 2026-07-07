@@ -31,7 +31,7 @@ class OnDemandValidation(ValidationPolicy):
 
 
 class CustomValidation(ValidationPolicy):
-    """Custom validation via webhook."""
+    """Custom validation via webhook (not yet implemented — schema only)."""
     type: str = "custom"
     validator_url: str = Field(..., description="Webhook URL for validation")
     parameters: Dict[str, Any] = Field(default_factory=dict)
@@ -48,7 +48,7 @@ class SubAgent(BaseModel):
 class MissionCreateRequest(BaseModel):
     """Request to create a mission."""
     task: str = Field(..., description="Natural language task description")
-    agent_id: str = Field(..., description="Agent SPIFFE ID or name")
+    agent_id: str = Field(..., description="Agent identifier (overridden by token sub when Keycloak is enabled)")
     scope: List[str] = Field(..., description="List of scopes (permissions)")
     validation: Dict[str, Any] = Field(..., description="Validation policy")
     sub_agents: Optional[List[SubAgent]] = None
@@ -63,12 +63,7 @@ class MissionCreateRequest(BaseModel):
 
 
 class MissionApproveRequest(BaseModel):
-    """Request to approve a mission.
-
-    approved_by is derived from the authenticated user token when Keycloak is
-    enabled. The field is accepted but ignored in that case.
-    """
-    approved_by: Optional[str] = Field(None, description="Ignored when Keycloak auth is enabled")
+    """Request to approve a mission. approved_by is derived from the auth token."""
     notes: Optional[str] = None
 
 
@@ -92,14 +87,12 @@ class ScopeExpansionRequest(BaseModel):
 
 
 class ScopeExpansionApproveRequest(BaseModel):
-    """Request to approve a scope expansion."""
-    approved_by: str = Field(..., description="User approving the expansion")
+    """Request to approve a scope expansion. approved_by is derived from the auth token."""
     notes: Optional[str] = None
 
 
 class ScopeExpansionDenyRequest(BaseModel):
-    """Request to deny a scope expansion."""
-    denied_by: str = Field(..., description="User denying the expansion")
+    """Request to deny a scope expansion. denied_by is derived from the auth token."""
     reason: Optional[str] = None
 
 

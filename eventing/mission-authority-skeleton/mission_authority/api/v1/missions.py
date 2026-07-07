@@ -111,7 +111,7 @@ async def approve_mission(
     token_service = TokenService()
     mission_token = token_service.generate_mission_token(mission)
 
-    logger.info(f"Approved mission {mission_id} by {request.approved_by}")
+    logger.info(f"Approved mission {mission_id} by {user.preferred_username}")
 
     # TODO: Publish mission.approved CloudEvent
 
@@ -273,6 +273,7 @@ async def approve_scope_expansion(
     expansion_id: str,
     request: ScopeExpansionApproveRequest,
     db: AsyncSession = Depends(get_db),
+    user: TokenClaims = Depends(require_user_token),
 ):
     """Approve a pending scope expansion.
 
@@ -309,14 +310,14 @@ async def approve_scope_expansion(
 
     expansion.status = "approved"
     expansion.approved_at = datetime.utcnow()
-    expansion.approved_by = request.approved_by
+    expansion.approved_by = user.preferred_username
 
     await db.commit()
     await db.refresh(expansion)
 
     logger.info(
         f"Approved scope expansion {expansion_id} for mission {mission_id} "
-        f"by {request.approved_by}"
+        f"by {user.preferred_username}"
     )
 
     return ScopeExpansionResponse.model_validate(expansion)
@@ -331,6 +332,7 @@ async def deny_scope_expansion(
     expansion_id: str,
     request: ScopeExpansionDenyRequest,
     db: AsyncSession = Depends(get_db),
+    user: TokenClaims = Depends(require_user_token),
 ):
     """Deny a pending scope expansion request."""
     result = await db.execute(
@@ -357,7 +359,7 @@ async def deny_scope_expansion(
 
     logger.info(
         f"Denied scope expansion {expansion_id} for mission {mission_id} "
-        f"by {request.denied_by}"
+        f"by {user.preferred_username}"
     )
 
     return ScopeExpansionResponse.model_validate(expansion)
