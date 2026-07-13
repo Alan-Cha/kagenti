@@ -1,0 +1,80 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mission-authority-postgres-pvc
+  namespace: kagenti-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: gp3-csi
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mission-authority-postgres
+  namespace: kagenti-system
+  labels:
+    app: mission-authority-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mission-authority-postgres
+  template:
+    metadata:
+      labels:
+        app: mission-authority-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: quay.io/fedora/postgresql-15
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRESQL_DATABASE
+              value: missions
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mission-authority-postgres-secret
+                  key: username
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mission-authority-postgres-secret
+                  key: password
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/pgsql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mission-authority", "-d", "missions"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "mission-authority", "-d", "missions"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: mission-authority-postgres-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mission-authority-postgres
+  namespace: kagenti-system
+spec:
+  selector:
+    app: mission-authority-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

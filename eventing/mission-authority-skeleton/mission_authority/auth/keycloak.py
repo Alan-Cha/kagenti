@@ -75,9 +75,13 @@ def _decode_keycloak_token(token: str) -> TokenClaims:
         )
 
     realm_access = payload.get("realm_access", {})
+    # sub may be absent when a Keycloak client uses a custom token mapper
+    # that strips it; fall back to preferred_username or azp
+    sub = payload.get("sub") or payload.get("preferred_username") or payload.get("azp", "unknown")
+    preferred_username = payload.get("preferred_username") or payload.get("azp") or sub
     return TokenClaims(
-        sub=payload["sub"],
-        preferred_username=payload.get("preferred_username", payload.get("azp", payload["sub"])),
+        sub=sub,
+        preferred_username=preferred_username,
         email=payload.get("email"),
         client_id=payload.get("azp"),
         roles=realm_access.get("roles", []),

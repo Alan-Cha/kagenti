@@ -1,0 +1,16 @@
+---
+# OpenShift Route — exposes mission-authority externally
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: mission-authority
+  namespace: kagenti-system
+spec:
+  to:
+    kind: Service
+    name: mission-authority
+  port:
+    targetPort: 8000
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

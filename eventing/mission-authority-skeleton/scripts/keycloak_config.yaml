@@ -17,8 +17,8 @@
 keycloak:
   url: http://localhost:8080          # Change to your Keycloak URL
   realm: kagenti                       # Realm that Mission Authority lives in
-  admin_username: admin
-  admin_password: admin               # Use --admin-password flag to avoid storing here
+  admin_username: temp-admin
+  admin_password: ""                  # Use --admin-password flag to avoid storing here
 
 mission_authority:
   client_id: mission-authority

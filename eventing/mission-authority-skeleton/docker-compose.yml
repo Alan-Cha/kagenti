@@ -24,7 +24,9 @@ services:
       dockerfile: Dockerfile
     container_name: mission-authority
     ports:
-      - "8000:8000"
+      # Host 8770 -> container 8000. 8000 is a very common dev port and often
+      # collides with other local services; 8770 is far less likely to conflict.
+      - "8770:8000"
     environment:
       MISSION_AUTHORITY_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/missions
       MISSION_AUTHORITY_LOG_LEVEL: INFO

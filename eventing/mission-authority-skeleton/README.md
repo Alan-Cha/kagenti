@@ -24,8 +24,11 @@ See [design docs](../docs/design/) for architecture context, ADRs, and the PAP/P
 # Start PostgreSQL and the service
 docker compose up
 
-# Service is available at http://localhost:8000
-# API docs at http://localhost:8000/docs
+# Service is available at http://localhost:8770  (host port 8770 -> container 8000)
+# API docs at http://localhost:8770/docs
+
+# Run the API test suite against the local instance
+./mission-authority-api-tests.py
 ```
 
 ### Without Docker
