@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     )
     kagenti_feature_flag_acp: bool = False  # ACP WebSocket protocol gateway
     kagenti_feature_flag_external_skills: bool = False  # External skill registry references
+    kagenti_feature_flag_missions: bool = False  # Mission Authority integration
+
+    # Mission Authority — URL of the Mission Authority service
+    mission_authority_url: str = ""  # e.g. http://mission-authority.kagenti-system.svc.cluster.local:8000
     # Auto-inject MCP_URL / LLM env vars on agent import (TUI parity; weather demo defaults)
     kagenti_feature_flag_agent_import_defaults: bool = False
     skill_autosync_interval: int = (

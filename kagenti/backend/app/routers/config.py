@@ -40,6 +40,7 @@ class FeatureFlagsResponse(BaseModel):
     agentImportDefaults: bool = Field(
         description="Auto-inject MCP_URL and LLM env vars on agent import"
     )
+    missions: bool = Field(description="Mission Authority integration (PAP workflow)")
 
 
 class ComponentStatus(BaseModel):
@@ -91,6 +92,7 @@ async def get_feature_flags(
         authbridgeAPI=settings.kagenti_feature_flag_authbridge_api,
         admin=settings.kagenti_feature_flag_admin,
         agentImportDefaults=settings.kagenti_feature_flag_agent_import_defaults,
+        missions=settings.kagenti_feature_flag_missions,
     )
 
 

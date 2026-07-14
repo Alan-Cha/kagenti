@@ -35,6 +35,9 @@ import { SandboxesPage } from './pages/SandboxesPage';
 import { SessionsTablePage } from './pages/SessionsTablePage';
 import { SessionGraphPage } from './pages/SessionGraphPage';
 import { TriggerManagementPage } from './pages/TriggerManagementPage';
+import { MissionCatalogPage } from './pages/MissionCatalogPage';
+import { MissionDetailPage } from './pages/MissionDetailPage';
+import { MissionCreatePage } from './pages/MissionCreatePage';
 
 function App() {
   const features = useFeatureFlags();
@@ -152,6 +155,13 @@ function App() {
         )}
         {features.triggers && (
           <Route path="/triggers" element={<ProtectedRoute><TriggerManagementPage /></ProtectedRoute>} />
+        )}
+        {features.missions && (
+          <>
+            <Route path="/missions" element={<ProtectedRoute><MissionCatalogPage /></ProtectedRoute>} />
+            <Route path="/missions/new" element={<ProtectedRoute><MissionCreatePage /></ProtectedRoute>} />
+            <Route path="/missions/:missionId" element={<ProtectedRoute><MissionDetailPage /></ProtectedRoute>} />
+          </>
         )}
         <Route
           path="/mcp-gateway"

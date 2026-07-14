@@ -1586,3 +1586,88 @@ export const authBridgeService = {
   },
 };
 
+
+// ─── Mission Authority ───────────────────────────────────────────────────────
+
+import type {
+  Mission,
+  MissionCreateRequest,
+  MissionCreateResponse,
+  MissionApproveResponse,
+  MissionListResponse,
+  ScopeExpansion,
+  ScopeExpansionRequest,
+} from '@/types/mission';
+
+export const missionService = {
+  async list(params?: {
+    status?: string;
+    agent_id?: string;
+    page?: number;
+    page_size?: number;
+  }): Promise<MissionListResponse> {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.agent_id) qs.set('agent_id', params.agent_id);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.page_size) qs.set('page_size', String(params.page_size));
+    const query = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<MissionListResponse>(`/missions${query}`);
+  },
+
+  async get(missionId: string): Promise<Mission> {
+    return apiFetch<Mission>(`/missions/${encodeURIComponent(missionId)}`);
+  },
+
+  async create(req: MissionCreateRequest): Promise<MissionCreateResponse> {
+    return apiFetch<MissionCreateResponse>('/missions', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
+  },
+
+  async approve(missionId: string, notes?: string): Promise<MissionApproveResponse> {
+    return apiFetch<MissionApproveResponse>(
+      `/missions/${encodeURIComponent(missionId)}/approve`,
+      { method: 'POST', body: JSON.stringify({ notes: notes ?? null }) },
+    );
+  },
+
+  async cancel(missionId: string, reason?: string): Promise<void> {
+    await apiFetch(`/missions/${encodeURIComponent(missionId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason ?? null }),
+    });
+  },
+
+  async requestExpansion(
+    missionId: string,
+    req: ScopeExpansionRequest,
+  ): Promise<ScopeExpansion> {
+    return apiFetch<ScopeExpansion>(
+      `/missions/${encodeURIComponent(missionId)}/expand-scope`,
+      { method: 'POST', body: JSON.stringify(req) },
+    );
+  },
+
+  async approveExpansion(
+    missionId: string,
+    expansionId: string,
+  ): Promise<ScopeExpansion> {
+    return apiFetch<ScopeExpansion>(
+      `/missions/${encodeURIComponent(missionId)}/expansions/${encodeURIComponent(expansionId)}/approve`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+  },
+
+  async denyExpansion(
+    missionId: string,
+    expansionId: string,
+    reason?: string,
+  ): Promise<ScopeExpansion> {
+    return apiFetch<ScopeExpansion>(
+      `/missions/${encodeURIComponent(missionId)}/expansions/${encodeURIComponent(expansionId)}/deny`,
+      { method: 'POST', body: JSON.stringify({ reason: reason ?? null }) },
+    );
+  },
+};
