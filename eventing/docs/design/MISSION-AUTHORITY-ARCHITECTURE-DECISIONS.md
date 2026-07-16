@@ -3,6 +3,10 @@
 **Status**: Living document — captures decisions and open questions from design discussions  
 **Last Updated**: 2026-07-16
 
+> **Naming note**: The Kagenti platform is being renamed to **Rosso** (see kagenti/kagenti#2207).
+> AuthBridge retains its name. "RossoCortex" / "AgentCortex" refers to AuthBridge in the context of
+> the Rosso platform. `rossoctl` is the new CLI. This document uses AuthBridge throughout.
+
 ---
 
 ## 1. Role Terminology (PAP / PDP / PEP / PIP)
@@ -109,33 +113,87 @@ This is a pure policy decision — no token issuance. MA checks: status=active, 
 
 ---
 
-## 4. AgentCortex Architecture Gap — Open Question
+## 4. AuthBridge Architecture and Mission Authority Integration
 
-### The problem
+### AuthBridge is a sidecar — but it already calls centralized services
 
-AgentCortex is a **sidecar** — there is no centralized "AgentCortex service". Every agent pod has its own AgentCortex sidecar instance. This creates a fundamental question:
+AuthBridge is indeed a sidecar (one instance per agent pod), not a centralized service. This initially appears to create a fundamental problem: how does MA notify "AgentCortex" about an approved mission when there is no single endpoint to call?
 
-> When a mission is approved in Mission Authority, MA needs to notify *someone* that a mission is ready. But there is no single AgentCortex endpoint to call. The agent pod may not even exist yet.
+**The answer is already in AuthBridge's architecture.** AuthBridge has a plugin pipeline with two chains — inbound and outbound — and plugins can call external centralized services. Two existing plugins demonstrate this exact pattern:
 
-### Options being considered
+- **Token Broker plugin** — Each AuthBridge sidecar calls a centralized `Token Broker Service` (HTTP) to acquire tokens for outbound requests. The broker manages the token lifecycle; the sidecar just asks.
+- **OPA plugin** — Each AuthBridge sidecar polls a centralized `Bundle Service` (cluster singleton) for its policy bundle. Policies are managed centrally; sidecars pull them.
 
-| Option | How | Tradeoff |
-|---|---|---|
-| **Pull model** | AgentCortex polls MA for missions assigned to its agent | Simple, no dispatch needed; latency between approval and execution |
-| **CloudEvent dispatch** | MA publishes `mission.approved` event; a central controller subscribes and coordinates | Decoupled; requires Knative eventing infrastructure |
-| **Kagenti operator as dispatcher** | MA calls Kagenti API on approval; operator decides which agent handles it | Centralizes the routing decision in the operator |
-| **HTTP call to a known agent** | MA calls a specific agent's service endpoint directly | Only works if the target agent is already running and its URL is known at approval time |
+**Mission Authority fits the same pattern.** MA is a centralized HTTP service. AuthBridge sidecars call it at token exchange time — not the other way around.
 
-### Current state
+### The corrected flow
 
-**No implementation exists for this dispatch layer.** The current MA skeleton assumes the mission token is handed back to the requesting agent directly (synchronous request/response). For async, event-driven missions this is an open design question.
+MA does not notify AuthBridge. AuthBridge consults MA:
 
-**What needs to be decided:**
-1. Who assigns a mission to a specific agent instance?
-2. Does the agent need to be running before approval, or does approval trigger spawning?
-3. What is the protocol between MA and whatever receives the dispatch?
+```
+Agent makes outbound request
+  → AuthBridge outbound pipeline intercepts
+  → Mission Authority plugin calls MA PDP:
+      POST /authorize { mission_id, agent_id, requested_scope, resource }
+      ← { allow: true, remaining_uses: 4 }
+  → If allowed: token exchange with Keycloak
+  → Forward request with fresh token
+```
 
-*Agent spawning on mission approval is deferred — see §5.*
+This resolves the centralization question entirely. The sidecar calls the central MA service on every token exchange — MA doesn't need to know which pod is asking.
+
+### AuthBridge plugin pipeline
+
+AuthBridge processes requests through sequential plugin chains:
+
+```
+Inbound (caller → this agent):
+  request phase  → jwt-validation → a2a-parser → session-recorder
+  response phase ← a2a-parser ← jwt-validation
+
+Outbound (this agent → target service):
+  request phase  → route-resolver → token-exchange → mcp-parser
+  response phase ← mcp-parser ← token-exchange
+```
+
+Mission Authority integration is an **outbound plugin** that runs before token exchange:
+
+```
+Outbound request phase:
+  → route-resolver
+  → mission-authority-pdp  ← NEW: calls MA /authorize, rejects if denied
+  → token-exchange          (only reached if MA says allow)
+  → mcp-parser
+```
+
+Plugins are composable and registered per agent via configuration. The `mission-authority-pdp` plugin can be selectively enabled for mission-driven agents without affecting others.
+
+### OPA in AuthBridge (kagenti-bundle-service)
+
+AuthBridge already has an **OPA plugin** that evaluates Rego policies per-request using bundles served by `kagenti-bundle-service` (a cluster singleton). This provides:
+
+- **Inbound control**: who can call this agent (identity, scopes, client IDs)
+- **Tool-level access**: which MCP tools a caller may invoke
+- **Outbound control**: what external services this agent can use
+
+OPA policy and Mission Authority PDP are **complementary**, not competing:
+- OPA evaluates *structural* policy: role-based rules, tool allowlists, client restrictions
+- Mission Authority evaluates *mission-state* policy: is this mission still active, usage limits, time windows
+
+Both can run in the same outbound pipeline. OPA fires first (structural check), then MA (mission-state check).
+
+### The remaining open question: who dispatches missions to agents?
+
+The token-exchange-time consultation pattern (AuthBridge → MA) solves authorization. But there is still an open question for *async* missions where an agent doesn't exist yet:
+
+> Mission is approved → who spawns the agent?
+
+Options (to be decided):
+1. **Operator-driven**: MA emits a CloudEvent → Kagenti/Rosso operator receives it → operator creates the AgentRuntime CRD → pod spawns with mission token injected
+2. **Pull model**: A running agent polls MA for pending missions matching its `agent_id`
+3. **Synchronous only (Demo 1)**: The requesting agent already exists and receives the mission token immediately in the approval response — no dispatch needed
+
+*Agent spawning is deferred — see §5.*
 
 ---
 
