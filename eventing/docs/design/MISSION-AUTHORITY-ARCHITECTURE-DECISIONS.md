@@ -37,7 +37,117 @@ Keycloak has Authorization Services (UMA-based) which *can* act as a PDP. Howeve
 
 ---
 
-## 2. Token Minting — Who Issues the Mission Token?
+## 2. Mission Creation Request — Inputs, Trust, and Scope Validation
+
+### What information does minting a mission token require?
+
+To mint a mission token MA needs:
+
+| Field | Source | Trusted? |
+|---|---|---|
+| `created_by` (who is requesting) | Extracted from the Bearer token's `preferred_username` / `sub` claim | **Yes** — verified by MA against Keycloak's JWKS |
+| `agent_id` (which agent will run it) | Request body | **Partially** — MA stores it, but doesn't verify the agent exists |
+| `scope` (permissions being requested) | Request body | **Depends on model** — see below |
+| `task` (human-readable description) | Request body | Trusted as user input |
+| `validation` (max_uses, valid_until) | Request body | Trusted as user input |
+
+### What does the request look like?
+
+With Keycloak enabled (`MISSION_AUTHORITY_KEYCLOAK_ENABLED=true`), every create-mission call must carry a valid Keycloak Bearer token:
+
+```http
+POST /api/v1/missions
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+Content-Type: application/json
+
+{
+  "task": "Research AI safety literature and summarise findings for the wiki",
+  "agent_id": "research-agent",
+  "scope": ["wiki_read", "wiki_write", "web_search"],
+  "validation": {
+    "type": "on_demand",
+    "max_uses": 5,
+    "valid_until": "2026-12-31T23:59:59Z"
+  },
+  "labels": {
+    "team": "research",
+    "project": "ai-safety"
+  }
+}
+```
+
+MA decodes the Bearer token and extracts:
+```
+created_by = token.preferred_username  →  "alice@example.com"
+             (or token.sub if preferred_username absent)
+```
+
+The resulting mission record stores `created_by: alice@example.com` without Alice needing to state her own identity in the request body.
+
+### Can the request be trusted?
+
+**The requester's identity is strongly trusted** — it comes from a Keycloak-signed JWT validated against Keycloak's JWKS. Alice cannot forge this.
+
+**The `agent_id` is weakly trusted** — it is a logical name supplied by the requester. MA does not verify the agent exists in the cluster; that happens later when the operator tries to spawn it. This is acceptable: the human approver sees the `agent_id` and validates it makes sense before approving.
+
+**The `scope` is where the trust question is most important.** Three options:
+
+#### Option 1 — Human approver is the scope gate (Demo 1, current)
+
+MA accepts any scopes in the request without validating them against the requester's Keycloak roles. The human approver is responsible for deciding whether the requested scopes are appropriate. If Alice requests `admin_delete` but shouldn't have it, the approver denies the mission.
+
+```
+Requester can ask for any scope.
+Approver decides if those scopes are appropriate.
+```
+
+**Pros:** Simple. No mapping between Keycloak roles and MA scopes needed.  
+**Cons:** A malicious or mistaken requester could request elevated scopes; defence relies entirely on the human approver noticing.
+
+#### Option 2 — MA validates scopes against requester's Keycloak roles
+
+MA checks whether the requesting user's JWT includes roles that map to the requested scopes. If Alice's token has `role: wiki_viewer` but not `role: wiki_admin`, she cannot request `wiki_write` scope.
+
+Requires: a role-to-scope mapping maintained in MA's configuration or as a `KagentiPolicy` CRD.
+
+```python
+# Example mapping in MA config
+SCOPE_REQUIRES_ROLE = {
+    "wiki_read":   "wiki_viewer",
+    "wiki_write":  "wiki_editor",
+    "admin_delete": "platform_admin",
+}
+```
+
+**Pros:** Prevents privilege escalation at request time. Defence in depth alongside human approval.  
+**Cons:** Requires maintaining the role↔scope mapping. Adds coupling between Keycloak roles and MA domain.
+
+#### Option 3 — Keycloak validates scopes at token exchange time
+
+No scope validation at mission creation. Instead, at token exchange time, Keycloak enforces whether the agent's client is permitted to exchange for the requested scope/audience. If the scope exceeds what Keycloak allows for that client, the exchange fails.
+
+```
+Mission created with any scopes.
+At exchange time: Keycloak rejects if scope/audience not permitted for the agent client.
+```
+
+**Pros:** Single enforcement point (Keycloak). No mapping to maintain in MA.  
+**Cons:** The failure is discovered late (at execution time, not creation time). The human approver may have approved a mission that will fail at runtime.
+
+#### Recommendation
+
+| Phase | Approach |
+|---|---|
+| **Demo 1** | Option 1 — human approver is the scope gate |
+| **Production** | Option 2 + Option 3 — validate at request time AND enforce at exchange time (defence in depth) |
+
+### Where does agent_id come from in practice?
+
+In the Kagenti UI, the mission create form lets the user pick from a list of deployed agents (fetched from `GET /api/v1/agents`). The selected agent's name becomes `agent_id`. This provides soft validation — the user can only pick agents that exist in the cluster at creation time. MA does not re-validate at approval or execution time.
+
+---
+
+## 3. Token Minting — Who Issues the Mission Token?
 
 ### The question
 
