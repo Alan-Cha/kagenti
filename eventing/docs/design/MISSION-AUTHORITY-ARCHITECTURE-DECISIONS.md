@@ -1,7 +1,7 @@
 # Mission Authority — Architecture Decisions
 
 **Status**: Living document — captures decisions and open questions from design discussions  
-**Last Updated**: 2026-07-14
+**Last Updated**: 2026-07-16
 
 ---
 
@@ -150,7 +150,93 @@ When a mission is approved, it may require spawning a new agent pod to fulfill i
 
 ---
 
-## 6. Components Not Yet Implemented
+## 7. Pre-Authorization Problem — Identity for Agents That Don't Exist Yet
+
+### The problem
+
+When a mission is approved, the agent that will execute it may not exist yet. AgentCortex (or the Kagenti operator) will spawn it later. But the mission needs to say something like:
+
+> "An agent that will be created in the future will have these roles and these scopes, and it should be permitted to act on this mission."
+
+The challenge: you cannot issue credentials to an entity that has no identity yet. Standard OAuth2 assumes the client already exists in Keycloak before it can receive a token. You need a mechanism to pre-declare identity and bind it to the mission at approval time, then hand it to the agent at spawn time.
+
+---
+
+### Option A — Mission token IS the agent's bootstrap credential (simplest)
+
+The mission token itself becomes the agent's identity for all mission-scoped operations. The `agent_id` field in the mission is a logical name (e.g. `research-agent`), not a reference to a live Keycloak client. AgentCortex injects the mission token into the spawned agent pod as an environment variable or mounted secret. The agent presents that token for all outbound calls; AgentCortex validates it against MA before exchanging it with Keycloak.
+
+```
+Mission approval
+  → MA issues mission token (sub=research-agent, mission_id=M-..., scope=[...])
+  → Operator spawns agent pod with MISSION_TOKEN env var
+  → Agent uses MISSION_TOKEN for all calls via AgentCortex proxy
+  → AgentCortex calls MA PDP: "is this mission token still valid for this scope?"
+  → MA says yes → AgentCortex calls Keycloak to get a service-scoped token
+```
+
+**Pros:** No pre-provisioning of Keycloak clients per agent instance. The mission token carries all the authorization context. Already partially implemented.  
+**Cons:** The agent's Keycloak identity is inherited from the mission token's `sub` claim rather than a distinct workload identity. Makes audit trails at the service level show `research-agent` rather than a specific pod/instance.
+
+---
+
+### Option B — Kubernetes Service Account as pre-provisioned identity
+
+Pre-create a Kubernetes Service Account (KSA) for the agent type (e.g. `sa/research-agent` in `team1`). KSA tokens are issued by the cluster's OIDC provider and bound to the SA. The mission references the SA name; when the operator spawns the pod it mounts the SA token as a projected volume. AgentCortex exchanges the SA token with Keycloak (using the existing OIDC federation between the cluster and Keycloak) to get a Keycloak token, then calls MA PDP to validate the mission.
+
+```
+Mission references: agent_id=research-agent → maps to sa/team1/research-agent
+Operator spawns pod with SA token mounted
+AgentCortex: SA token → Keycloak token exchange → service token
+             + MA PDP check: is mission M-... active for scope wiki_write?
+```
+
+**Pros:** Clean workload identity using Kubernetes primitives. SA exists before the mission; no per-mission credential generation. Standard pattern used broadly in Kubernetes.  
+**Cons:** Requires pre-creating SAs for all agent types. SA is a type identity, not an instance identity — if two pods of the same type run concurrently, they share the same SA and can't be distinguished in audit logs.
+
+---
+
+### Option C — SPIFFE/SPIRE workload identity (zero-trust, most robust)
+
+SPIRE issues a SPIFFE SVID to any pod matching a registered selector (namespace, service account, labels). The SPIFFE ID is declared in the mission: `spiffe://cluster.local/ns/team1/sa/research-agent`. This identity exists as a *policy* before the pod exists — SPIRE will issue a matching SVID as soon as a pod with the right attributes is spawned.
+
+```
+Mission approval: declares agent_id=spiffe://cluster.local/ns/team1/sa/research-agent
+Operator spawns pod with matching labels/SA
+SPIRE issues JWT-SVID to the pod automatically
+AgentCortex: SVID → Keycloak (via SPIFFE IdP) → Keycloak token
+             + MA PDP check: is mission M-... active for this SPIFFE identity?
+```
+
+**Pros:** Identity is cryptographically bound to the workload, not a secret. Survives pod restarts. No credentials to inject at spawn time. The "future agent" identity is declared structurally (via SPIFFE selector patterns), not by pre-issuing credentials.  
+**Cons:** Requires SPIRE deployed and configured (already supported by AgentCortex/AuthBridge in `spiffe` mode, but not always enabled). More operational complexity.
+
+---
+
+### Option D — Ephemeral Keycloak client per mission
+
+On mission approval, MA (or the operator) creates a new Keycloak client specifically for this mission execution: `client_id: mission-exec-M-20260716-abc12345`. The client is granted exactly the approved scopes. The operator spawns the agent pod with these credentials injected. The client is deleted when the mission completes or is canceled.
+
+**Pros:** Per-mission identity — fully traceable in Keycloak audit logs. Scopes are enforced at the Keycloak level.  
+**Cons:** Client proliferation in Keycloak (one client per mission). Requires Keycloak Admin API calls on every mission approval/completion. Keycloak's client list can grow unbounded without aggressive cleanup.
+
+---
+
+### Recommendation
+
+| Phase | Approach | Reason |
+|---|---|---|
+| **Demo 1** | Option A — mission token as bootstrap | Already implemented, zero new infrastructure |
+| **Production (no SPIRE)** | Option B — Kubernetes Service Account | Clean, Kubernetes-native, no custom code |
+| **Production (with SPIRE)** | Option C — SPIFFE/SPIRE workload identity | Zero-trust, no secrets to manage, matches AgentCortex's existing SPIFFE mode |
+
+Option D (ephemeral Keycloak clients) is not recommended — the operational overhead of client lifecycle management outweighs the benefits.
+
+The key insight for all options: **the `agent_id` field in a mission is a logical declaration of intent** ("an agent of this type will execute this mission"), not a reference to a live process. The binding between that logical identity and a running pod happens at spawn time, via whichever mechanism the operator uses.
+
+---
+
+## 8. Components Not Yet Implemented
 
 | Component | Description | Priority |
 |---|---|---|
@@ -158,13 +244,15 @@ When a mission is approved, it may require spawning a new agent pod to fulfill i
 | MA registered as Keycloak IdP | One-time Keycloak config so token exchange works | High |
 | AgentCortex calls MA before token exchange | PEP calls PDP before calling Keycloak | High |
 | Mission dispatch mechanism | How MA notifies AgentCortex/operator on approval | Medium |
+| Agent identity binding at spawn time | Operator injects mission token / mounts SA / configures SPIFFE per §7 | Medium |
 | `canceled_at` / `canceled_by` in MA API response | Currently not returned in mission detail | Low |
+| Mission token renewal endpoint | `POST /missions/{id}/renew-token` for long-running missions | Low |
 | Agent spawning on mission approval | Operator/dispatcher creates agent pod for mission | Deferred |
 | MA token → Keycloak-minted token migration | Full Keycloak issuance via User Session Note mapper | Future |
 
 ---
 
-## 7. What Mission Authority Is Not
+## 9. What Mission Authority Is Not
 
 To avoid scope creep, explicit non-goals:
 
