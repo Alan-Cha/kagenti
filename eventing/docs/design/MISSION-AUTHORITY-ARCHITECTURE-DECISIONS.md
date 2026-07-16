@@ -236,6 +236,80 @@ The key insight for all options: **the `agent_id` field in a mission is a logica
 
 ---
 
+### 7b. Agent Specification — What Kind of Agent to Spawn?
+
+A related open question: when a mission is approved and an agent needs to be spawned, the operator needs to know *what kind of agent* to create — its prompt/system instructions, model, memory/storage requirements, skills and tools, resource limits. None of this belongs in the JWT token (tokens are credentials, not configuration manifests). The token stays small.
+
+**Separation of concerns:**
+
+| What | Where it lives | Why |
+|---|---|---|
+| Authorization credential | Mission token (JWT) | Small, signed, `mission_id` + `scope` + `exp` only |
+| Full agent specification | Mission record in MA's PostgreSQL | Arbitrarily large, mutable, operator fetches at spawn time |
+
+At spawn time, the operator receives a `mission_id` (via dispatch), calls `GET /missions/{id}` on MA to fetch the full spec, then creates the agent pod.
+
+**Three approaches for defining the agent spec within a mission:**
+
+**Approach 1 — Template reference**
+
+The mission names an existing agent template, and the operator looks it up:
+
+```json
+{
+  "task": "Research AI safety and update wiki",
+  "agent_id": "research-agent",
+  "agent_template": "research-agent-v2",
+  "scope": ["wiki_read", "wiki_write"]
+}
+```
+
+`research-agent-v2` is a pre-registered Kagenti `AgentRuntime` CRD that defines prompt, model, resources, and tools. The mission only names the template; defaults come from the CRD. Simple, but inflexible — missions can't customize individual agents.
+
+**Approach 2 — Inline agent spec with overrides**
+
+The mission carries a partial agent spec that overrides template defaults:
+
+```json
+{
+  "task": "Research AI safety and update wiki",
+  "agent_id": "research-agent",
+  "agent_spec": {
+    "template": "research-agent-v2",
+    "model": "llama3.2:3b-instruct-fp16",
+    "system_prompt": "You are a research assistant focused on AI safety...",
+    "resources": { "memory": "4Gi", "cpu": "1" },
+    "tools": ["web_search", "wiki_write"]
+  },
+  "scope": ["wiki_read", "wiki_write"]
+}
+```
+
+More flexible — each mission can customize the agent. The `tools` list maps to Kagenti `Tool` CRDs already deployed in the cluster.
+
+**Approach 3 — Full inline spec (no template)**
+
+The mission is fully self-contained. The operator needs no external lookup for the agent definition. Maximum flexibility, maximum verbosity. Suitable if missions are always created programmatically (e.g. by an orchestrator).
+
+**Recommendation for Demo 1:** Approach 1 (template reference). The `agent_id` field already exists and maps to an existing AgentRuntime. No schema changes needed. Approach 2 is the right long-term design once missions are being created through the UI and need per-mission customization.
+
+**What the mission token carries regardless of approach:**
+
+```
+{
+  "iss": "https://mission-authority...",
+  "sub": "research-agent",       ← logical agent type, not instance
+  "mission_id": "M-20260716-...",
+  "scope": ["wiki_read", "wiki_write"],
+  "exp": ...,
+  "iat": ...
+}
+```
+
+The full spec — prompt, model, resources — lives in the mission record, not the token. The token is the key; the mission record is the door it opens.
+
+---
+
 ## 8. Components Not Yet Implemented
 
 | Component | Description | Priority |
